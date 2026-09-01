@@ -130,15 +130,25 @@ class SharedCooldown:
     writing, so there is nothing for a lock to protect.
     """
 
-    FALLBACK = 7.0      # used only when a 429 carries no Retry-After
-    MIN_FALLBACK = 1.0
-    MAX_FALLBACK = 60.0
+    # Measured against the live endpoint: Roblox's 429 carries NO Retry-After,
+    # in neither the header nor the body (just {"errors":[{"code":4,...}]}).
+    # So on this endpoint the fallback below is not a rare last resort - it is
+    # the only policy there is, and it has to be able to come back down.
+    FALLBACK = 7.0
+    MIN_FALLBACK = 5.0
+    MAX_FALLBACK = 45.0
     FALLBACK_GROWTH = 1.5
-    FALLBACK_DECAY = 0.995
+    # Symmetric with the growth. The old 0.995-per-success decay was a one-way
+    # ratchet in practice: a real run grew the wait 7.6x over five 429s while
+    # two successes shrank it by 1%, so it climbed to the cap and stayed there,
+    # parking 92 of a 93-second run. Stepping back down by the same factor a
+    # failure steps up keeps it hunting around the rate that actually works.
+    FALLBACK_DECAY = 1 / FALLBACK_GROWTH
 
     def __init__(self) -> None:
         self._resume_at = 0.0
         self._fallback = self.FALLBACK
+        self._parked_since_success = False
 
     @property
     def resume_in(self) -> float:
@@ -165,6 +175,7 @@ class SharedCooldown:
             self._fallback = min(
                 self._fallback * self.FALLBACK_GROWTH, self.MAX_FALLBACK,
             )
+            self._parked_since_success = True
         resume = time.monotonic() + wait
         already = max(0.0, self._resume_at - time.monotonic())
         if resume > self._resume_at:
@@ -180,11 +191,16 @@ class SharedCooldown:
         )
 
     def succeed(self) -> None:
-        """A request got through - let an overshot fallback drift back down."""
-        if self._fallback > self.MIN_FALLBACK:
+        """A request got through - step the fallback back down.
+
+        Only counts once per cooldown: a burst of successes after one park is
+        evidence the wait worked, not evidence it should collapse to nothing.
+        """
+        if self._parked_since_success and self._fallback > self.MIN_FALLBACK:
             self._fallback = max(
                 self._fallback * self.FALLBACK_DECAY, self.MIN_FALLBACK,
             )
+        self._parked_since_success = False
 
 
 # ---------------------------------------------------------------------------
