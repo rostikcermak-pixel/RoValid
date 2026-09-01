@@ -1,0 +1,9 @@
+__pycache__/
+.venv/
+*.pyc
+.DS_Store
+data/config.json
+data/proxies.txt
+data/names_to_check.txt
+results/
+logs/
