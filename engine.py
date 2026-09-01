@@ -223,6 +223,14 @@ class RobloxChecker:
 
     MAX_RETRIES = 20
     MAX_RETRIES_ROTATING = 100
+
+    # Give up on a name after this long and let the caller retry it later.
+    # This exists for a static proxy pool, where a name stuck behind one bad
+    # proxy is better abandoned than waited on - there are other routes.
+    # It deliberately does NOT apply proxyless: there is no other route, the
+    # shared cooldown means waiting is exactly the right move, and enforcing
+    # it there threw away names that a few more seconds would have resolved
+    # (they surfaced as "?" in the feed and landed in unresolved.txt).
     STATIC_TOTAL_TIMEOUT = 120.0
 
     def __init__(
@@ -257,6 +265,7 @@ class RobloxChecker:
         else:
             self._cooldown = SharedCooldown() if proxy_manager.is_proxyless else None
         self._rotating = proxy_manager.is_single
+        self._proxyless = proxy_manager.is_proxyless
         self._scraped = scraped
         self._cb = circuit_breaker
         self._stats = stats
@@ -382,7 +391,11 @@ class RobloxChecker:
             attempt += 1
             if attempt > self._max_retries:
                 return None
-            if not self._rotating and time.time() - started > self.STATIC_TOTAL_TIMEOUT:
+            if (
+                not self._rotating
+                and not self._proxyless
+                and time.time() - started > self.STATIC_TOTAL_TIMEOUT
+            ):
                 return None
 
             if self._stats:
@@ -470,7 +483,11 @@ class RobloxChecker:
             attempt += 1
             if attempt > self._max_retries:
                 return (ERROR, None)
-            if not self._rotating and time.time() - started > self.STATIC_TOTAL_TIMEOUT:
+            if (
+                not self._rotating
+                and not self._proxyless
+                and time.time() - started > self.STATIC_TOTAL_TIMEOUT
+            ):
                 return (ERROR, None)
 
             if self._stats:
