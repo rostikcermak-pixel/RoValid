@@ -176,7 +176,7 @@ def live_card(
     if stage == 1 and candidates:
         content.add_section()
         content.add_row(Text(
-            f"{candidates} candidates survived screening -> stage 2 will confirm them",
+            f"{candidates} candidates survived screening -> stage 2 is confirming them",
             style=C.MUTED,
         ))
 
