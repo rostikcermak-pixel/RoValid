@@ -47,12 +47,42 @@ rule is: your runtime is roughly *(number of stage-2 candidates) x (your
 per-request rate)*, and everything stage 1 eliminates is nearly free.
 
 Proxyless, Roblox allows about three requests before throttling, then reopens
-roughly six seconds after you stop hammering. That caps a single IP at a few
-hundred stage-2 confirmations per hour.
+roughly six seconds after you stop hammering. That is a hard ceiling of roughly
+1,800 stage-2 confirmations per hour on one IP, and RoValid now runs close to
+it (see below) rather than at the ~25% of it that blind retrying managed.
 
 **If stage 2 has more than ~100 candidates, use proxies.** Each proxy carries
 its own rate-limit bucket, and that is the only thing that lifts this ceiling.
 Free scraped proxies are enough — see below.
+
+### Proxyless: don't fight the rate limiter
+
+The important half of Roblox's proxyless limiter is easy to miss: the reopen
+timer starts when the bucket **empties**, and a request arriving while it is
+shut pushes that timer back. Retrying into a closed bucket therefore spends a
+real request to rediscover a limit you already know about, *and* delays the
+reopen. Measured against that limiter, the old blind-retry policy wasted 42%
+of every request it sent and ran at about a quarter of the achievable rate:
+
+```
+400 names, proxyless, 2 workers
+  before:  397s   (85 requests, 34 of them 429s)
+  after:   108s   (83 requests, 32 of them 429s)
+```
+
+Almost the same number of 429s - what changed is what each one costs. Every
+worker now parks on one shared resume time taken from the server's own
+`Retry-After`, instead of each backing off on its own schedule escalating
+from 7s toward 45s keyed to a per-name attempt counter. That lands within
+about 1.05x of the theoretical best the bucket allows.
+
+Note what this deliberately does *not* do: it never paces sends proactively.
+Spacing requests evenly is worse here, not better - a steady trickle into a
+bucket whose clock keeps resetting can starve indefinitely, and in simulation
+even spacing failed to finish at any interval tried. Sending freely while the
+bucket is giving is also what keeps this safe if Roblox's real limits are more
+generous than the ones measured here; across every limiter shape simulated it
+was 1.3x-3.6x faster than before, and never slower.
 
 ### Client-side throughput
 
@@ -82,8 +112,9 @@ client-side scheduling:
   that validation drains as they arrive, instead of stage 2 waiting for the last
   chunk to be screened. Both stages draw from one shared in-flight request
   budget, so the concurrency you set is still the concurrency you get.
-- Duplicate input names are dropped, sockets are kept alive across the run, and
-  local username validation is a single set operation.
+- Duplicate input names are dropped (case-insensitively, since Roblox treats
+  usernames that way), sockets are kept alive across the run, and local
+  username validation is a single set operation.
 
 ---
 
