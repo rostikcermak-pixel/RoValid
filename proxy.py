@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import asyncio
+import bisect
 import itertools
 import random
 import re
@@ -35,7 +36,14 @@ class ProxyManager:
         cleaned = [p.strip() if p else None for p in proxies]
         self._proxies: list[str | None] = cleaned if cleaned else [None]
         self._proxyless = all(p is None for p in self._proxies)
-        self._cycle = itertools.cycle(self._proxies)
+
+        # Pre-format every proxy URL once. `_format` strips and builds an
+        # f-string, and the old code ran it on every rotation step - up to
+        # 2 * len(proxies) times per request on the static path.
+        self._formatted: list[str | None] = [self._format(p) for p in self._proxies]
+        self._single: str | None = self._formatted[0] if self._formatted else None
+
+        self._cycle = itertools.cycle(self._formatted)
         self._dead: set[str] = set()
         self._cooldowns: dict[str, float] = {}
         self.remove_on_fail = remove_on_fail
@@ -46,10 +54,19 @@ class ProxyManager:
         self._scores: dict[str, int] = {}
         self._rate_limited_until: dict[str, float] = {}
         if scored:
-            for raw in self._proxies:
+            for raw, key in zip(self._proxies, self._formatted):
                 if raw and raw.strip():
-                    key = self._format(raw) or raw.strip()
-                    self._scores[key] = 1
+                    self._scores[key or raw.strip()] = 1
+
+        # Cached weighted-pick table for the scored path (see `_rebuild_ready`).
+        self._ready_keys: list[str] = []
+        self._ready_cum: list[int] = []
+        self._ready_total: int = 0
+        self._ready_at: float = 0.0
+        # Earliest moment a currently-unavailable proxy becomes usable again.
+        # Reaching it forces a rebuild, so a cooldown expiring is picked up the
+        # instant it lapses rather than whenever the TTL happens to run out.
+        self._next_expiry: float = float("inf")
 
     # ── Properties ──
 
@@ -85,13 +102,66 @@ class ProxyManager:
 
     # ── Core: next proxy ──
 
+    # How long a built weighted-pick table stays usable. Scores drift slowly
+    # (+5 a hit, -1 a miss), so a pick made against a table a fraction of a
+    # second old is indistinguishable from an exact one - and every entry is
+    # re-verified against the live dicts before it is handed out anyway.
+    READY_CACHE_TTL = 0.5
+
+    def _rebuild_ready(self, now: float) -> None:
+        """Rebuild the cumulative-weight table of currently usable proxies.
+
+        Caller must hold `self._lock`. This is the O(n) pass the old code ran
+        on *every single request*; it now runs at most twice a second, and the
+        per-request cost drops to a bisect over the cached table.
+        """
+        keys: list[str] = []
+        cum: list[int] = []
+        total = 0
+        next_expiry = float("inf")
+        dead = self._dead
+        cooldowns = self._cooldowns
+        limited = self._rate_limited_until
+        for k, v in self._scores.items():
+            if not k or v <= 0 or k in dead:
+                continue
+            cd = cooldowns.get(k, 0.0)
+            rl = limited.get(k, 0.0)
+            until = cd if cd > rl else rl
+            if until > now:
+                # Held back only by time - note when it comes back.
+                if until < next_expiry:
+                    next_expiry = until
+                continue
+            total += v
+            keys.append(k)
+            cum.append(total)
+        self._ready_keys = keys
+        self._ready_cum = cum
+        self._ready_total = total
+        self._ready_at = now
+        self._next_expiry = next_expiry
+
+    def _pick_ready(self, now: float) -> str | None:
+        """Weighted-random pick from the cached table, or None if it is empty.
+
+        Caller must hold `self._lock`.
+        """
+        if self._ready_total <= 0:
+            return None
+        pick = random.uniform(0, self._ready_total)
+        i = bisect.bisect_left(self._ready_cum, pick)
+        if i >= len(self._ready_keys):
+            i = len(self._ready_keys) - 1
+        return self._ready_keys[i]
+
     async def next(self) -> str | None:
         """Return the next ready proxy, or None if exhausted/proxyless."""
         if self._proxyless:
             return None
 
         if self.is_single:
-            return self._format(self._proxies[0])
+            return self._single
 
         # Scored path (scraped free proxies) - weighted random
         if self._scored:
@@ -99,24 +169,29 @@ class ProxyManager:
             while True:
                 async with self._lock:
                     now = time.time()
-                    live = {
-                        k: v for k, v in self._scores.items()
-                        if k and v > 0
-                        and k not in self._dead
-                        and now >= self._cooldowns.get(k, 0)
-                        and now >= self._rate_limited_until.get(k, 0)
-                    }
-                    if live:
-                        keys = list(live.keys())
-                        weights = [live[k] for k in keys]
-                        total_w = sum(weights)
-                        pick = random.uniform(0, total_w) if total_w > 0 else 0
-                        acc = 0
-                        for i, k in enumerate(keys):
-                            acc += weights[i]
-                            if acc >= pick:
-                                return k
-                        return keys[-1]
+                    if (
+                        now - self._ready_at >= self.READY_CACHE_TTL
+                        or now >= self._next_expiry
+                    ):
+                        self._rebuild_ready(now)
+
+                    candidate = self._pick_ready(now)
+                    if candidate is not None:
+                        # The table may name a proxy that went onto cooldown
+                        # since it was built, so confirm against the live
+                        # dicts. A stale hit forces one rebuild, and the
+                        # retry then picks from a table that is exact as of
+                        # `now` - so this never loops more than twice.
+                        if (
+                            candidate not in self._dead
+                            and self._cooldowns.get(candidate, 0.0) <= now
+                            and self._rate_limited_until.get(candidate, 0.0) <= now
+                            and self._scores.get(candidate, 0) > 0
+                        ):
+                            return candidate
+                        self._rebuild_ready(now)
+                        if self._ready_total > 0:
+                            continue
 
                     # Nothing live right now. If everything is permanently
                     # dead we are done; if it is only cooldowns, wait it out.
@@ -131,25 +206,28 @@ class ProxyManager:
                     return None
                 await asyncio.sleep(min(max(soonest - time.time(), 0.2), 5.0))
 
-        # Static multi-proxy path
+        # Static multi-proxy path. `self._cycle` yields pre-formatted URLs, so
+        # a rotation step is now just a dict lookup instead of a strip plus an
+        # f-string per candidate.
         while True:
             async with self._lock:
                 if len(self._dead) >= len(self._proxies):
                     return None
 
+                now = time.time()
+                dead = self._dead
+                cooldowns = self._cooldowns
                 for _ in range(len(self._proxies) * 2):
-                    raw = next(self._cycle)
-                    proxy = self._format(raw) if raw else None
+                    proxy = next(self._cycle)
                     key = proxy or ""
-                    if key in self._dead:
+                    if key in dead:
                         continue
-                    if key in self._cooldowns and time.time() < self._cooldowns[key]:
+                    if cooldowns.get(key, 0.0) > now:
                         continue
                     return proxy
 
-                now = time.time()
                 earliest = min(
-                    (v for v in self._cooldowns.values() if v > now),
+                    (v for v in cooldowns.values() if v > now),
                     default=now + 1,
                 )
                 wait = max(earliest - now, 0.2)
@@ -174,8 +252,11 @@ class ProxyManager:
         if not self._scored or not proxy:
             return
         if proxy in self._scores:
-            self._rate_limited_until[proxy] = time.time() + seconds
+            until = time.time() + seconds
+            self._rate_limited_until[proxy] = until
             self._scores[proxy] = min(self._scores[proxy] + 1, 100)
+            if until < self._next_expiry:
+                self._next_expiry = until
 
     def score_miss(self, proxy: str | None) -> None:
         """-1 point for a failed proxy. Score <= 0 -> removed."""
@@ -186,18 +267,26 @@ class ProxyManager:
             if self._scores[proxy] <= 0:
                 self._dead.add(proxy)
                 del self._scores[proxy]
+                # Permanent removal - force a rebuild rather than letting the
+                # cached table keep offering a proxy that no longer exists.
+                self._ready_at = 0.0
 
     async def mark_dead(self, proxy: str | None) -> None:
         if not self.remove_on_fail or proxy is None:
             return
         async with self._lock:
             self._dead.add(proxy)
+            # Drop the cached pick table so a dead proxy is never offered.
+            self._ready_at = 0.0
 
     async def set_cooldown(self, proxy: str | None, seconds: float) -> None:
         if proxy is None:
             return
         async with self._lock:
-            self._cooldowns[proxy] = time.time() + seconds
+            until = time.time() + seconds
+            self._cooldowns[proxy] = until
+            if until < self._next_expiry:
+                self._next_expiry = until
 
     # ── Validation ──
 

@@ -54,6 +54,37 @@ hundred stage-2 confirmations per hour.
 its own rate-limit bucket, and that is the only thing that lifts this ceiling.
 Free scraped proxies are enough — see below.
 
+### Client-side throughput
+
+Everything above is about *request economics* — how few requests the work can be
+done in. Separately, the client has to be able to issue them fast enough to keep
+the proxy pool busy, and with a large scraped pool that is where the real
+ceiling used to sit:
+
+```
+200,000 names, 200 workers, 5,000 scraped proxies, 50ms simulated latency
+  before:  22.5s   (8,900 names/sec)
+  after:    3.4s  (58,200 names/sec)
+```
+
+Identical results either way — the same 11,248 hits. The difference is all
+client-side scheduling:
+
+- **Proxy selection was O(pool) per request.** Every single request rebuilt a
+  filtered dict over the whole pool and did a linear weighted pick, so a
+  5,000-proxy pool capped the process at roughly 1,100 selections/sec of pure
+  event-loop CPU — well below what the pool could actually sustain. It now
+  picks by bisect against a table rebuilt at most twice a second (and
+  immediately when a cooldown lapses), which measures ~370x faster.
+- **The stats counters held an asyncio lock** for every increment, two or three
+  per request, on a single-threaded event loop where the lock protected nothing.
+- **Stage 1 and stage 2 now overlap.** Screening publishes survivors to a queue
+  that validation drains as they arrive, instead of stage 2 waiting for the last
+  chunk to be screened. Both stages draw from one shared in-flight request
+  budget, so the concurrency you set is still the concurrency you get.
+- Duplicate input names are dropped, sockets are kept alive across the run, and
+  local username validation is a single set operation.
+
 ---
 
 ## Quick start

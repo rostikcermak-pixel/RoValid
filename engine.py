@@ -21,6 +21,9 @@ from config import (
 )
 from proxy import ProxyManager
 
+# Rebuilt on every request in the old code; it never varies.
+_JSON_HEADERS = {"Content-Type": "application/json"}
+
 # ---------------------------------------------------------------------------
 # Outcomes
 # ---------------------------------------------------------------------------
@@ -120,9 +123,18 @@ class RobloxChecker:
         scraped: bool = False,
         circuit_breaker: CircuitBreaker | None = None,
         stats=None,
+        max_inflight: int = 0,
     ) -> None:
         self.pm = proxy_manager
         self.timeout = timeout
+
+        # One budget of concurrent in-flight requests, shared by both stages.
+        # Stage 1 and stage 2 now run at the same time, so without a shared
+        # gate their worker pools would add up and quietly double the request
+        # rate the user asked for. Whichever stage has work pending takes the
+        # slots, which is also what lets the two overlap without a fixed split
+        # starving either one.
+        self._gate = asyncio.Semaphore(max_inflight if max_inflight > 0 else 10_000)
         self._rotating = proxy_manager.is_single
         self._scraped = scraped
         self._cb = circuit_breaker
@@ -135,14 +147,24 @@ class RobloxChecker:
         else:
             self._max_retries = self.MAX_RETRIES
 
+        # The timeout never changes for the life of a run, so build the
+        # (immutable) ClientTimeout once here instead of allocating a fresh
+        # one on every single request attempt.
+        if scraped:
+            self._timeout_obj = aiohttp.ClientTimeout(total=8, sock_connect=5)
+        elif self._rotating:
+            self._timeout_obj = aiohttp.ClientTimeout(
+                total=min(self.timeout, 8), sock_connect=5,
+            )
+        else:
+            self._timeout_obj = aiohttp.ClientTimeout(
+                total=self.timeout, sock_connect=8,
+            )
+
     # ── shared plumbing ────────────────────────────────────────────────────
 
     def _req_timeout(self) -> aiohttp.ClientTimeout:
-        if self._scraped:
-            return aiohttp.ClientTimeout(total=8, sock_connect=5)
-        if self._rotating:
-            return aiohttp.ClientTimeout(total=min(self.timeout, 8), sock_connect=5)
-        return aiohttp.ClientTimeout(total=self.timeout, sock_connect=8)
+        return self._timeout_obj
 
     # Measured against the live endpoint: the bucket allows roughly three
     # requests, then reopens about six seconds after you STOP hammering it.
@@ -152,8 +174,14 @@ class RobloxChecker:
     PROXYLESS_BACKOFF_FLOOR = 7.0
     BACKOFF_CEILING = 45.0
 
-    async def _handle_429(self, resp, proxy, attempt: int = 1) -> None:
-        """Shared 429 policy: cool the proxy down, or wait if proxyless."""
+    async def _handle_429(self, resp, proxy, attempt: int = 1) -> float:
+        """Shared 429 policy: cool the proxy down, or wait if proxyless.
+
+        Returns the number of seconds the caller should back off for. The
+        sleep itself is the caller's job, because it has to happen *outside*
+        the in-flight gate - a worker serving out a 45s proxyless backoff
+        must not sit on a request slot the whole time.
+        """
         try:
             data = await resp.json()
             cooldown = float(data.get("retry_after", 0) or 0)
@@ -166,23 +194,23 @@ class RobloxChecker:
                 cooldown = 0.0
 
         if self._stats:
-            await self._stats.inc("ratelimited")
+            self._stats.inc("ratelimited")
 
         if self._scraped and proxy:
             self.pm.set_rate_limit(proxy, cooldown or 10.0)
-            return
+            return 0.0
         if self._rotating:
-            return  # fresh IP next request, no point waiting
+            return 0.0  # fresh IP next request, no point waiting
         if proxy:
             await self.pm.set_cooldown(proxy, cooldown or 10.0)
-            return
+            return 0.0
 
         # Proxyless: one shared bucket, so escalate and jitter. Jitter is what
         # stops concurrent workers waking in lockstep and re-throttling
         # each other on the same tick.
         base = max(cooldown, self.PROXYLESS_BACKOFF_FLOOR)
         wait = min(base * (1.5 ** min(attempt - 1, 4)), self.BACKOFF_CEILING)
-        await asyncio.sleep(wait + random.uniform(0, 1.5))
+        return wait + random.uniform(0, 1.5)
 
     async def _on_conn_error(self, proxy, attempt: int) -> None:
         """Shared connection-error policy."""
@@ -228,40 +256,42 @@ class RobloxChecker:
                 return None
 
             if self._stats:
-                await self._stats.inc("requests")
-                await self._stats.inc("batch_requests")
+                self._stats.inc("requests")
+                self._stats.inc("batch_requests")
 
+            backoff = 0.0
             try:
-                async with session.post(
-                    BATCH_ENDPOINT,
-                    json=payload,
-                    proxy=proxy,
-                    headers={"Content-Type": "application/json"},
-                    timeout=self._req_timeout(),
-                ) as resp:
-                    dbg(f"  [batch {attempt}] {len(names)} names -> HTTP {resp.status}")
+                # The gate covers only the request itself, so retry sleeps
+                # below release the slot for another worker to use.
+                async with self._gate:
+                    async with session.post(
+                        BATCH_ENDPOINT,
+                        json=payload,
+                        proxy=proxy,
+                        headers=_JSON_HEADERS,
+                        timeout=self._req_timeout(),
+                    ) as resp:
+                        dbg(f"  [batch {attempt}] {len(names)} names -> HTTP {resp.status}")
 
-                    if resp.status == 429:
-                        await self._handle_429(resp, proxy, attempt)
-                        continue
+                        if resp.status == 200:
+                            data = await resp.json()
+                            if self._scraped and proxy:
+                                self.pm.score_hit(proxy)
+                            return {
+                                entry.get("requestedUsername", "").lower()
+                                for entry in data.get("data", [])
+                                if entry.get("requestedUsername")
+                            }
 
-                    if resp.status == 200:
-                        data = await resp.json()
-                        if self._scraped and proxy:
-                            self.pm.score_hit(proxy)
-                        return {
-                            entry.get("requestedUsername", "").lower()
-                            for entry in data.get("data", [])
-                            if entry.get("requestedUsername")
-                        }
+                        if resp.status == 400:
+                            # Malformed chunk - caller falls back to stage 2.
+                            dbg(f"  [batch] HTTP 400: {(await resp.text())[:120]}")
+                            return None
 
-                    if resp.status == 400:
-                        # Malformed chunk - caller should fall back to stage 2.
-                        dbg(f"  [batch] HTTP 400: {(await resp.text())[:120]}")
-                        return None
-
-                    await asyncio.sleep(0.5)
-                    continue
+                        if resp.status == 429:
+                            backoff = await self._handle_429(resp, proxy, attempt)
+                        else:
+                            backoff = 0.5
 
             except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
                 dbg(f"  [batch {attempt}] {type(exc).__name__}")
@@ -271,6 +301,9 @@ class RobloxChecker:
                 dbg(f"  [batch {attempt}] {type(exc).__name__}: {exc!s:.100}")
                 await asyncio.sleep(0.3)
                 continue
+
+            if backoff > 0:
+                await asyncio.sleep(backoff)
 
     # ── Stage 2: signup validator ──────────────────────────────────────────
 
@@ -304,39 +337,41 @@ class RobloxChecker:
                 return (ERROR, None)
 
             if self._stats:
-                await self._stats.inc("requests")
+                self._stats.inc("requests")
 
+            backoff = 0.0
             try:
-                async with session.get(
-                    VALIDATE_ENDPOINT,
-                    params=params,
-                    proxy=proxy,
-                    timeout=self._req_timeout(),
-                ) as resp:
-                    dbg(f"  [{attempt}] {username} -> HTTP {resp.status}")
+                # As in batch_screen: hold a request slot for the request
+                # only, never across a backoff sleep.
+                async with self._gate:
+                    async with session.get(
+                        VALIDATE_ENDPOINT,
+                        params=params,
+                        proxy=proxy,
+                        timeout=self._req_timeout(),
+                    ) as resp:
+                        dbg(f"  [{attempt}] {username} -> HTTP {resp.status}")
 
-                    if resp.status == 429:
-                        await self._handle_429(resp, proxy, attempt)
-                        continue
+                        if resp.status == 200:
+                            data = await resp.json()
+                            code = data.get("code")
+                            if self._scraped and proxy:
+                                self.pm.score_hit(proxy)
+                            if code == CODE_AVAILABLE:
+                                return (AVAILABLE, code)
+                            if code == CODE_TAKEN:
+                                return (TAKEN, code)
+                            if code == CODE_CENSORED:
+                                return (CENSORED, code)
+                            return (INVALID, code)
 
-                    if resp.status == 200:
-                        data = await resp.json()
-                        code = data.get("code")
-                        if self._scraped and proxy:
-                            self.pm.score_hit(proxy)
-                        if code == CODE_AVAILABLE:
-                            return (AVAILABLE, code)
-                        if code == CODE_TAKEN:
-                            return (TAKEN, code)
-                        if code == CODE_CENSORED:
-                            return (CENSORED, code)
-                        return (INVALID, code)
+                        if resp.status == 400:
+                            return (INVALID, None)
 
-                    if resp.status == 400:
-                        return (INVALID, None)
-
-                    await asyncio.sleep(0.5)
-                    continue
+                        if resp.status == 429:
+                            backoff = await self._handle_429(resp, proxy, attempt)
+                        else:
+                            backoff = 0.5
 
             except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
                 dbg(f"  [{attempt}] {username} -> {type(exc).__name__}")
@@ -346,6 +381,9 @@ class RobloxChecker:
                 dbg(f"  [{attempt}] {username} -> {type(exc).__name__}: {exc!s:.100}")
                 await asyncio.sleep(0.3)
                 continue
+
+            if backoff > 0:
+                await asyncio.sleep(backoff)
 
 
 # ---------------------------------------------------------------------------

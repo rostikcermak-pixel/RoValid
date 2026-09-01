@@ -28,6 +28,7 @@ import argparse
 import asyncio
 import sys
 import time
+from collections import deque
 
 import aiohttp
 from rich.live import Live
@@ -90,7 +91,7 @@ async def _rps_calculator(stats: Stats, stop_event: asyncio.Event) -> None:
     while not stop_event.is_set():
         prev_req = stats.requests
         await asyncio.sleep(1)
-        await stats.set_rps(float(stats.requests - prev_req))
+        stats.set_rps(float(stats.requests - prev_req))
 
 
 # ---------------------------------------------------------------------------
@@ -127,6 +128,10 @@ async def _run_checker(cfg: RunConfig, settings: AppSettings) -> None:
         limit_per_host=0,
         enable_cleanup_closed=True,
         ttl_dns_cache=300,
+        # Hold idle sockets open well past aiohttp's 15s default. Both stages
+        # hit only two hosts, so a warm pool means a TLS handshake per
+        # connection for the whole run instead of one every 15 idle seconds.
+        keepalive_timeout=60,
     )
     session = aiohttp.ClientSession(
         connector=connector,
@@ -142,7 +147,7 @@ async def _run_checker(cfg: RunConfig, settings: AppSettings) -> None:
         async def _on_circuit_open():
             nonlocal paused
             paused = True
-            await stats.inc("circuit_opens")
+            stats.inc("circuit_opens")
             await asyncio.sleep(2.0)
             paused = False
         cb = CircuitBreaker(threshold=10, window=2.0, cooldown=2.0, on_open=_on_circuit_open)
@@ -150,26 +155,48 @@ async def _run_checker(cfg: RunConfig, settings: AppSettings) -> None:
     checker = RobloxChecker(
         pm, timeout=cfg.timeout, scraped=cfg.scraped,
         circuit_breaker=cb, stats=stats,
+        # Both stages run at once now, so the concurrency the user picked is
+        # enforced as one shared in-flight request budget inside the checker
+        # rather than as a worker count per stage.
+        max_inflight=cfg.concurrency,
     )
 
     webhook: WebhookSender | None = None
     if cfg.webhook_url and cfg.webhook_message:
         webhook = WebhookSender(cfg.webhook_url, cfg.webhook_message, session, start_time)
 
-    names = list(cfg.usernames)
+    # Duplicate names would each be screened and validated again for the same
+    # answer. dict.fromkeys drops them while preserving input order.
+    names = list(dict.fromkeys(cfg.usernames))
+    duplicates = len(cfg.usernames) - len(names)
     total_names = len(names)
-    recent_hits: list[str] = []
-    feed: list[str] = []
+
+    # Only the last handful of either list is ever rendered, so bounding them
+    # keeps a long run from accumulating a list entry per name checked.
+    recent_hits: deque[str] = deque(maxlen=16)
+    feed: deque[str] = deque(maxlen=16)
     unresolved: list[str] = []
 
-    # Live-display state, mutated by both stages
-    state = {"stage": 1, "done": 0, "total": 0}
+    # Live-display state. Both stages now run concurrently, so screening and
+    # validation progress are tracked separately and `stage` only decides
+    # which of the two the panel is currently showing.
+    state = {
+        "stage": 1,
+        "screened": 0,
+        "screen_total": total_names,
+        "validated": 0,
+        "cand_total": 0,
+    }
 
     def _live_render():
+        if state["stage"] == 1:
+            done, total = state["screened"], state["screen_total"]
+        else:
+            done, total = state["validated"], state["cand_total"]
         return live_card(
             stage=state["stage"],
-            stage_done=state["done"],
-            stage_total=state["total"],
+            stage_done=done,
+            stage_total=total,
             works=stats.works,
             taken=stats.taken,
             censored=stats.censored,
@@ -182,8 +209,8 @@ async def _run_checker(cfg: RunConfig, settings: AppSettings) -> None:
             elapsed=time.time() - start_time,
             proxy_alive=pm.alive_count,
             paused=paused,
-            recent=recent_hits,
-            feed=feed,
+            recent=list(recent_hits),
+            feed=list(feed),
         )
 
     stop_rps = asyncio.Event()
@@ -191,7 +218,7 @@ async def _run_checker(cfg: RunConfig, settings: AppSettings) -> None:
     webhook_task = asyncio.create_task(webhook.run()) if webhook else None
 
     async def _record_hit(name: str) -> None:
-        await stats.inc_works()
+        stats.inc_works()
         async with hits_lock:
             hits_file.write(f"{name}\n")
             hits_file.flush()
@@ -200,20 +227,53 @@ async def _run_checker(cfg: RunConfig, settings: AppSettings) -> None:
         if webhook:
             webhook.enqueue(name)
 
+    if duplicates:
+        console.print(
+            f"[{C.MUTED}]Skipped {duplicates} duplicate name"
+            f"{'s' if duplicates != 1 else ''} in the input[/]"
+        )
+
     console.print()
     try:
         with Live(_live_render(), refresh_per_second=4, console=console) as live:
 
-            # ── Stage 1: bulk existence screen ────────────────────────────
-            candidates: list[str] = []
+            # ── Stages 1 and 2, pipelined ─────────────────────────────────
+            #
+            # These used to run strictly one after the other: every chunk was
+            # screened, and only then did validation start. Stage 1 compresses
+            # 200 names into one request while stage 2 spends one request per
+            # survivor, so stage 2 is far and away the longer of the two - and
+            # all of stage 1's wall clock was being spent with the validator
+            # idle.
+            #
+            # Now stage 1 publishes survivors to a queue as each chunk comes
+            # back and stage 2 drains it concurrently, so screening time hides
+            # almost entirely inside validation time. The validators block on
+            # an empty queue, which is also what keeps the combined request
+            # rate honest early on: they only go wide once there is a backlog
+            # to go wide on.
+            cand_queue: asyncio.Queue[str | None] = asyncio.Queue()
+
+            def _enqueue(batch: list[str]) -> None:
+                for n in batch:
+                    cand_queue.put_nowait(n)
+                stats.inc("candidates", len(batch))
+                state["cand_total"] += len(batch)
+
+            # Both pools are sized to the full concurrency setting. That is
+            # not double the load: `checker` holds a shared semaphore of
+            # cfg.concurrency in-flight requests, so the two stages compete
+            # for one budget and whichever has work pending uses it. A fixed
+            # split would starve stage 1 on a low-survival run and stage 2 on
+            # a high-survival one.
+            n_validators = max(1, cfg.concurrency)
+            screen_tasks: list[asyncio.Task] = []
 
             if cfg.two_stage:
                 chunks = [names[i:i + BATCH_MAX] for i in range(0, len(names), BATCH_MAX)]
-                state.update(stage=1, done=0, total=len(names))
 
                 chunk_idx = 0
                 idx_lock = asyncio.Lock()
-                cand_lock = asyncio.Lock()
 
                 async def _next_chunk():
                     nonlocal chunk_idx
@@ -233,85 +293,81 @@ async def _run_checker(cfg: RunConfig, settings: AppSettings) -> None:
                         if taken_set is None:
                             # Could not resolve - hand the whole chunk to
                             # stage 2 rather than guessing they are free.
-                            async with cand_lock:
-                                candidates.extend(chunk)
+                            _enqueue(chunk)
                             feed.append(f"[{C.WARNING}]?[/] chunk unresolved")
                         else:
                             free = [n for n in chunk if n.lower() not in taken_set]
-                            await stats.inc_taken(len(chunk) - len(free))
-                            async with cand_lock:
-                                candidates.extend(free)
-                            await stats.inc("candidates", len(free))
-                        await stats.inc("screened", len(chunk))
-                        state["done"] += len(chunk)
+                            stats.inc_taken(len(chunk) - len(free))
+                            _enqueue(free)
+                        stats.inc("screened", len(chunk))
+                        state["screened"] += len(chunk)
 
-                workers = [
+                n_screeners = min(len(chunks), max(1, cfg.concurrency))
+                screen_tasks = [
                     asyncio.create_task(_screen_worker())
-                    for _ in range(min(cfg.concurrency, max(1, len(chunks))))
+                    for _ in range(n_screeners)
                 ]
-                while any(not w.done() for w in workers):
-                    await asyncio.sleep(0.25)
-                    live.update(_live_render())
-                await asyncio.gather(*workers, return_exceptions=True)
             else:
-                candidates = list(names)
-                await stats.inc("candidates", len(candidates))
-
-            # ── Stage 2: confirm survivors with the signup validator ──────
-            state.update(stage=2, done=0, total=len(candidates))
-            live.update(_live_render())
-
-            cand_idx = 0
-            cidx_lock = asyncio.Lock()
-
-            async def _next_candidate():
-                nonlocal cand_idx
-                async with cidx_lock:
-                    if cand_idx >= len(candidates):
-                        return None
-                    n = candidates[cand_idx]
-                    cand_idx += 1
-                    return n
+                # Validator-only mode: every name is a stage-2 candidate.
+                _enqueue(names)
+                state["stage"] = 2
+                state["screened"] = total_names
 
             async def _validate_worker() -> None:
                 while True:
-                    name = await _next_candidate()
-                    if name is None:
+                    name = await cand_queue.get()
+                    if name is None:  # sentinel: screening finished, queue drained
                         return
                     try:
                         outcome, code = await checker.validate(session, name)
                     except Exception:
                         unresolved.append(name)
-                        state["done"] += 1
+                        state["validated"] += 1
                         continue
 
                     if outcome == AVAILABLE:
                         await _record_hit(name)
                     elif outcome == TAKEN:
-                        await stats.inc_taken()
+                        stats.inc_taken()
                         feed.append(f"[{C.DANGER}]-[/] {name}")
                     elif outcome == CENSORED:
-                        await stats.inc("censored")
+                        stats.inc("censored")
                         feed.append(f"[{C.WARNING}]c[/] {name}")
                     elif outcome == INVALID:
-                        await stats.inc("invalid")
+                        stats.inc("invalid")
                     else:
                         unresolved.append(name)
                         feed.append(f"[{C.WARNING}]?[/] {name}")
 
-                    state["done"] += 1
+                    state["validated"] += 1
                     if proxyless:
                         await asyncio.sleep(0.5)
 
-            if candidates:
-                vworkers = [
-                    asyncio.create_task(_validate_worker())
-                    for _ in range(min(cfg.concurrency, len(candidates)))
-                ]
-                while any(not w.done() for w in vworkers):
-                    await asyncio.sleep(0.25)
-                    live.update(_live_render())
-                await asyncio.gather(*vworkers, return_exceptions=True)
+            vtasks = [
+                asyncio.create_task(_validate_worker())
+                for _ in range(n_validators)
+            ]
+
+            async def _seal_queue() -> None:
+                """Once screening is done, tell the validators when to stop."""
+                if screen_tasks:
+                    await asyncio.gather(*screen_tasks, return_exceptions=True)
+                    # Screening is over, so the panel switches to stage 2 and
+                    # the candidate total is final.
+                    state["stage"] = 2
+                for _ in range(n_validators):
+                    cand_queue.put_nowait(None)
+
+            seal_task = asyncio.create_task(_seal_queue())
+
+            running = [*screen_tasks, *vtasks, seal_task]
+            pending = set(running)
+            while pending:
+                # asyncio.wait sleeps on the tasks themselves rather than
+                # re-polling `.done()` over every worker four times a second.
+                _, pending = await asyncio.wait(pending, timeout=0.25)
+                live.update(_live_render())
+            await asyncio.gather(*running, return_exceptions=True)
 
             live.update(_live_render())
 
@@ -329,7 +385,7 @@ async def _run_checker(cfg: RunConfig, settings: AppSettings) -> None:
             webhook_task.cancel()
 
     elapsed = time.time() - start_time
-    snap = await stats.snapshot()
+    snap = stats.snapshot()
 
     hits_file.close()
     await session.close()
