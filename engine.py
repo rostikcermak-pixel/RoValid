@@ -166,8 +166,18 @@ class SharedCooldown:
                 self._fallback * self.FALLBACK_GROWTH, self.MAX_FALLBACK,
             )
         resume = time.monotonic() + wait
+        already = max(0.0, self._resume_at - time.monotonic())
         if resume > self._resume_at:
             self._resume_at = resume
+        # The single most useful number when a proxyless run is slower than
+        # expected: what the endpoint actually asked for, versus what we
+        # guessed when it asked for nothing.
+        dbg(
+            f"  [429] retry_after={retry_after or 'absent'} "
+            f"-> park {wait:.1f}s (fallback={self._fallback:.1f}s"
+            + (f", already parked {already:.1f}s" if already > 0 else "")
+            + ")"
+        )
 
     def succeed(self) -> None:
         """A request got through - let an overshot fallback drift back down."""
@@ -270,16 +280,19 @@ class RobloxChecker:
         the in-flight gate - a worker serving out a 45s proxyless backoff
         must not sit on a request slot the whole time.
         """
+        body = None
         try:
-            data = await resp.json()
-            cooldown = float(data.get("retry_after", 0) or 0)
+            body = await resp.json()
+            cooldown = float(body.get("retry_after", 0) or 0)
         except Exception:
             cooldown = 0.0
+        header = resp.headers.get("Retry-After")
         if not cooldown:
             try:
-                cooldown = float(resp.headers.get("Retry-After", 0) or 0)
+                cooldown = float(header or 0)
             except (TypeError, ValueError):
                 cooldown = 0.0
+        dbg(f"  [429] body={str(body)[:160]} Retry-After={header!r}")
 
         if self._stats:
             self._stats.inc("ratelimited")
