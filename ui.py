@@ -128,6 +128,7 @@ def live_card(
     paused: bool = False,
     recent: list[str] | None = None,
     feed: list[str] | None = None,
+    round_no: int = 1,
 ) -> Panel:
     """Build the live display panel."""
 
@@ -198,8 +199,10 @@ def live_card(
 
     return Panel(
         content,
-        title=f"[{C.PRIMARY}]RoValid[/] · Stage {stage}/2 {stage_name} · "
-              f"{stage_done}/{stage_total} ({pct:.0f}%) · [dim]{elapsed:.0f}s[/]",
+        title=f"[{C.PRIMARY}]RoValid[/] · "
+              + (f"Round {round_no} · " if round_no > 1 else "")
+              + f"Stage {stage}/2 {stage_name} · "
+                f"{stage_done}/{stage_total} ({pct:.0f}%) · [dim]{elapsed:.0f}s[/]",
         title_align="left",
         box=box.ROUNDED,
         border_style=C.BORDER if not paused else C.WARNING,
