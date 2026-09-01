@@ -158,7 +158,13 @@ The wizard asks four things. Pressing Enter through all of them is a valid run:
 3. **Speed** — accept the defaults.
 4. **Webhook** — `n` unless you want Discord notifications.
 
-Results land in `results/hits.txt`.
+When you generate names there is one extra question: **keep drawing new names
+until one is free?** Off by default. With it on, a round that finds nothing
+draws a fresh batch and goes again, stopping at the first hit or on Ctrl+C.
+Rounds share one rate-limit cooldown, so repeating costs no re-learning of the
+limit, and names an earlier round already checked are never re-checked.
+
+Results land in `results/hits.txt`, written the moment each hit is found.
 
 Flags: `--no-wizard` reuses your last setup, `--debug` logs every request, `--version`.
 

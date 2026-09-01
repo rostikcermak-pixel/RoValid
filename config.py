@@ -193,6 +193,15 @@ class RunConfig:
     webhook_url: str | None = None
     webhook_message: str | None = None
 
+    # Keep drawing fresh batches until something turns up. Only meaningful
+    # for generated names - a file is finite, so re-running it just re-asks
+    # Roblox the same questions. The gen_* fields record how the first batch
+    # was made so later rounds can be drawn the same way.
+    repeat_until_found: bool = False
+    gen_length: int = 0          # 0 = these names did not come from the generator
+    gen_count: int = 0
+    gen_underscore: bool = False
+
 
 @dataclass
 class Stats:

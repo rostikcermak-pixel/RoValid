@@ -233,6 +233,7 @@ class RobloxChecker:
         circuit_breaker: CircuitBreaker | None = None,
         stats=None,
         max_inflight: int = 0,
+        cooldown: "SharedCooldown | None" = None,
     ) -> None:
         self.pm = proxy_manager
         self.timeout = timeout
@@ -248,7 +249,13 @@ class RobloxChecker:
         # Proxyless is the only mode where all workers share one rate-limit
         # bucket. A rotating gateway gets a fresh IP per request, and a
         # scraped pool is cooled per proxy by ProxyManager.set_rate_limit.
-        self._cooldown = SharedCooldown() if proxy_manager.is_proxyless else None
+        # A caller running several rounds passes its own cooldown in, so the
+        # rate it learned in round 1 is not thrown away and re-discovered
+        # (at the cost of a fresh set of 429s) at the start of round 2.
+        if cooldown is not None:
+            self._cooldown = cooldown
+        else:
+            self._cooldown = SharedCooldown() if proxy_manager.is_proxyless else None
         self._rotating = proxy_manager.is_single
         self._scraped = scraped
         self._cb = circuit_breaker

@@ -86,12 +86,22 @@ async def setup_wizard(config: Config, settings: AppSettings) -> RunConfig:
     # ── Step 2: Usernames ──
     console.print()
     console.print(progress_steps(1))
-    usernames, invalid_count = _step_usernames()
+    usernames, invalid_count, gen_params = _step_usernames()
 
     # ── Step 3: Speed ──
     console.print()
     console.print(progress_steps(2))
     concurrency, timeout, two_stage = _step_speed(proxies, scraped)
+
+    repeat = False
+    if gen_params:
+        repeat = Confirm.ask(
+            f"Keep drawing new names until one is free? "
+            f"[dim](stops on the first hit, Ctrl+C to give up)[/]",
+            default=False,
+        )
+        if repeat:
+            info("Each round draws a fresh batch; names already checked are skipped.")
 
     # ── Step 4: Webhook ──
     console.print()
@@ -133,6 +143,10 @@ async def setup_wizard(config: Config, settings: AppSettings) -> RunConfig:
         two_stage=two_stage,
         webhook_url=webhook_url,
         webhook_message=webhook_msg,
+        repeat_until_found=repeat,
+        gen_length=gen_params[0] if gen_params else 0,
+        gen_count=gen_params[1] if gen_params else 0,
+        gen_underscore=gen_params[2] if gen_params else False,
     )
 
 
@@ -247,8 +261,18 @@ def _generate(length: int, count: int, allow_underscore: bool) -> list[str]:
     return out
 
 
-def _step_usernames() -> tuple[list[str], int]:
-    """Returns (valid_usernames, invalid_count)."""
+def generate_usernames(length: int, count: int, allow_underscore: bool = False) -> list[str]:
+    """Draw a fresh batch of generated names (used between repeat rounds)."""
+    return _generate(length, count, allow_underscore)
+
+
+def _step_usernames() -> tuple[list[str], int, tuple[int, int, bool] | None]:
+    """Returns (valid_usernames, invalid_count, generation_params).
+
+    generation_params is (length, count, allow_underscore) when the names
+    were generated, or None when they came from a file - repeat rounds need
+    it to redraw, and a file cannot be redrawn.
+    """
     raw = Prompt.ask(
         f"[{C.PRIMARY}](f)ile[/] or [{C.PRIMARY}](g)enerate[/] usernames?",
         choices=["f", "g"],
@@ -257,6 +281,7 @@ def _step_usernames() -> tuple[list[str], int]:
     mode = "generate" if raw == "g" else "file"
     usernames: list[str] = []
     invalid_count = 0
+    gen_params: tuple[int, int, bool] | None = None
 
     if mode == "file":
         names_path = Prompt.ask("Path to username file", default=_NAMES_FILE_DISPLAY)
@@ -280,6 +305,7 @@ def _step_usernames() -> tuple[list[str], int]:
         count = IntPrompt.ask("How many to generate", default=5000)
         allow_us = Confirm.ask("Include underscore names?", default=False)
 
+        gen_params = (length, count, allow_us)
         ok(f"Generating {count} random {length}-char usernames...")
         usernames = _generate(length, count, allow_us)
 
@@ -298,7 +324,7 @@ def _step_usernames() -> tuple[list[str], int]:
     if len(deduped) < len(usernames):
         info(f"Removed {len(usernames) - len(deduped)} case-duplicate names")
 
-    return deduped, invalid_count
+    return deduped, invalid_count, gen_params
 
 
 # ---------------------------------------------------------------------------

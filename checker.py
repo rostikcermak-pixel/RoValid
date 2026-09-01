@@ -24,6 +24,29 @@ def _safe_eof(self):
 _sslproto.SSLProtocol.eof_received = _safe_eof
 # ──────────────────────────────────────────────────────────────────────────
 
+# ── Windows ConnectionResetError noise ────────────────────────────────────
+# Roblox resets idle TLS sockets rather than closing them politely. On
+# Windows the Proactor loop then calls shutdown() on the dead socket from a
+# callback, where nothing catches the resulting ConnectionResetError, so
+# asyncio prints a full traceback per socket - dozens of them at the end of
+# a run that otherwise finished fine. The connection is already gone at this
+# point and there is nothing to recover, so the error is pure noise.
+try:
+    import asyncio.proactor_events as _proactor
+
+    _orig_conn_lost = _proactor._ProactorBasePipeTransport._call_connection_lost
+
+    def _safe_conn_lost(self, exc):
+        try:
+            return _orig_conn_lost(self, exc)
+        except ConnectionResetError:
+            return None
+
+    _proactor._ProactorBasePipeTransport._call_connection_lost = _safe_conn_lost
+except (ImportError, AttributeError):  # pragma: no cover - non-Windows loops
+    pass
+# ──────────────────────────────────────────────────────────────────────────
+
 import argparse
 import asyncio
 import sys
@@ -62,7 +85,7 @@ from engine import (
 )
 from proxy import ProxyManager
 from ui import C, banner, console, final_summary, live_card
-from wizard import setup_wizard
+from wizard import generate_usernames, setup_wizard
 
 
 # ---------------------------------------------------------------------------
@@ -98,8 +121,19 @@ async def _rps_calculator(stats: Stats, stop_event: asyncio.Event) -> None:
 # Main runner
 # ---------------------------------------------------------------------------
 
-async def _run_checker(cfg: RunConfig, settings: AppSettings) -> None:
-    """Two-stage checker with a live display."""
+async def _run_checker(
+    cfg: RunConfig,
+    settings: AppSettings,
+    *,
+    round_no: int = 1,
+    cooldown=None,
+    already_checked: set[str] | None = None,
+) -> int:
+    """Two-stage checker with a live display. Returns the hit count.
+
+    `cooldown` and `already_checked` are carried across repeat rounds so a
+    later round neither re-learns the rate limit nor re-checks a name.
+    """
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     hits_path = RESULTS_DIR / "hits.txt"
@@ -153,7 +187,7 @@ async def _run_checker(cfg: RunConfig, settings: AppSettings) -> None:
 
     checker = RobloxChecker(
         pm, timeout=cfg.timeout, scraped=cfg.scraped,
-        circuit_breaker=cb, stats=stats,
+        circuit_breaker=cb, stats=stats, cooldown=cooldown,
         # Both stages run at once now, so the concurrency the user picked is
         # enforced as one shared in-flight request budget inside the checker
         # rather than as a worker count per stage.
@@ -175,8 +209,12 @@ async def _run_checker(cfg: RunConfig, settings: AppSettings) -> None:
         if _key not in _seen:
             _seen.add(_key)
             names.append(_n)
+    if already_checked:
+        names = [n for n in names if n.lower() not in already_checked]
     duplicates = len(cfg.usernames) - len(names)
     total_names = len(names)
+    if already_checked is not None:
+        already_checked.update(n.lower() for n in names)
 
     # Only the last handful of either list is ever rendered, so bounding them
     # keeps a long run from accumulating a list entry per name checked.
@@ -204,6 +242,7 @@ async def _run_checker(cfg: RunConfig, settings: AppSettings) -> None:
             stage=state["stage"],
             stage_done=done,
             stage_total=total,
+            round_no=round_no,
             works=stats.works,
             taken=stats.taken,
             censored=stats.censored,
@@ -394,7 +433,7 @@ async def _run_checker(cfg: RunConfig, settings: AppSettings) -> None:
 
     hits_file.close()
     await session.close()
-    await asyncio.sleep(0.1)  # let the connector close cleanly
+    await asyncio.sleep(0.25)  # let the connector close cleanly
 
     # Names we could not resolve get written out so a re-run can retry
     # exactly those, instead of silently vanishing from the results.
@@ -420,6 +459,74 @@ async def _run_checker(cfg: RunConfig, settings: AppSettings) -> None:
         console.print(
             f"[{C.WARNING}]{len(unresolved)}[/] names unresolved -> "
             f"[{C.MUTED}]results/unresolved.txt[/] (re-run with that as your input file)"
+        )
+
+    return snap["works"]
+
+
+# ---------------------------------------------------------------------------
+# Round loop
+# ---------------------------------------------------------------------------
+
+MAX_REDRAW_TRIES = 6
+
+
+async def _run_rounds(cfg: RunConfig, settings: AppSettings) -> None:
+    """Run the checker once, or repeatedly until a name comes back free.
+
+    Every round shares one cooldown and one set of already-checked names, so
+    repeating costs no re-learning of the rate limit and never spends a
+    request on a name an earlier round already answered.
+    """
+    from engine import SharedCooldown
+
+    repeat = cfg.repeat_until_found and cfg.gen_length > 0
+    cooldown = SharedCooldown() if not cfg.proxies else None
+    already: set[str] = set()
+
+    round_no = 1
+    total_hits = 0
+    while True:
+        if repeat and round_no > 1:
+            console.print()
+            console.print(
+                f"[{C.PRIMARY}]Round {round_no}[/] "
+                f"[{C.MUTED}]- {len(already)} names checked so far, still looking[/]"
+            )
+
+        total_hits += await _run_checker(
+            cfg, settings,
+            round_no=round_no,
+            cooldown=cooldown,
+            already_checked=already if repeat else None,
+        )
+
+        if total_hits > 0 or not repeat:
+            break
+
+        # Draw a batch that has no overlap with what earlier rounds covered.
+        fresh: list[str] = []
+        for _ in range(MAX_REDRAW_TRIES):
+            batch = generate_usernames(
+                cfg.gen_length, cfg.gen_count, cfg.gen_underscore,
+            )
+            fresh = [n for n in batch if n.lower() not in already]
+            if fresh:
+                break
+        if not fresh:
+            console.print(
+                f"[{C.WARNING}]No unchecked names left to draw[/] "
+                f"[{C.MUTED}]- the {cfg.gen_length}-character space is exhausted.[/]"
+            )
+            break
+
+        cfg.usernames = fresh
+        round_no += 1
+
+    if repeat and round_no > 1:
+        console.print(
+            f"[{C.MUTED}]{round_no} rounds, {len(already)} names checked, "
+            f"{total_hits} found.[/]"
         )
 
 
@@ -467,7 +574,7 @@ def main() -> None:
         else:
             run_config = asyncio.run(setup_wizard(cfg_store, settings))
 
-        asyncio.run(_run_checker(run_config, settings))
+        asyncio.run(_run_rounds(run_config, settings))
     except (EOFError, KeyboardInterrupt):
         console.print(f"\n[{C.WARNING}]Aborted.[/]")
         sys.exit(0)
