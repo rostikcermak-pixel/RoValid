@@ -93,15 +93,7 @@ async def setup_wizard(config: Config, settings: AppSettings) -> RunConfig:
     console.print(progress_steps(2))
     concurrency, timeout, two_stage = _step_speed(proxies, scraped)
 
-    repeat = False
-    if gen_params:
-        repeat = Confirm.ask(
-            f"Keep drawing new names until one is free? "
-            f"[dim](stops on the first hit, Ctrl+C to give up)[/]",
-            default=False,
-        )
-        if repeat:
-            info("Each round draws a fresh batch; names already checked are skipped.")
+    repeat = bool(gen_params and gen_params[3])
 
     # ── Step 4: Webhook ──
     console.print()
@@ -266,12 +258,12 @@ def generate_usernames(length: int, count: int, allow_underscore: bool = False) 
     return _generate(length, count, allow_underscore)
 
 
-def _step_usernames() -> tuple[list[str], int, tuple[int, int, bool] | None]:
+def _step_usernames() -> tuple[list[str], int, tuple[int, int, bool, bool] | None]:
     """Returns (valid_usernames, invalid_count, generation_params).
 
-    generation_params is (length, count, allow_underscore) when the names
-    were generated, or None when they came from a file - repeat rounds need
-    it to redraw, and a file cannot be redrawn.
+    generation_params is (length, count, allow_underscore, repeat) when the
+    names were generated, or None when they came from a file - repeat rounds
+    need it to redraw, and a file cannot be redrawn.
     """
     raw = Prompt.ask(
         f"[{C.PRIMARY}](f)ile[/] or [{C.PRIMARY}](g)enerate[/] usernames?",
@@ -281,7 +273,7 @@ def _step_usernames() -> tuple[list[str], int, tuple[int, int, bool] | None]:
     mode = "generate" if raw == "g" else "file"
     usernames: list[str] = []
     invalid_count = 0
-    gen_params: tuple[int, int, bool] | None = None
+    gen_params: tuple[int, int, bool, bool] | None = None
 
     if mode == "file":
         names_path = Prompt.ask("Path to username file", default=_NAMES_FILE_DISPLAY)
@@ -299,13 +291,23 @@ def _step_usernames() -> tuple[list[str], int, tuple[int, int, bool] | None]:
                 info(f"Skipped {invalid_count} that break Roblox's rules")
 
     if mode == "generate":
+        # Asked before the count, because it changes what the count means.
+        repeat = Confirm.ask(
+            "Keep drawing new names until one is free? "
+            "[dim](stops on the first hit, Ctrl+C to give up)[/]",
+            default=False,
+        )
         length = IntPrompt.ask(
             "Username length", default=5, choices=["3", "4", "5", "6"],
         )
-        count = IntPrompt.ask("How many to generate", default=5000)
+        if repeat:
+            info("Rounds run until a hit; below is the batch size for each one.")
+            count = IntPrompt.ask("How many per round", default=1000)
+        else:
+            count = IntPrompt.ask("How many to generate", default=5000)
         allow_us = Confirm.ask("Include underscore names?", default=False)
 
-        gen_params = (length, count, allow_us)
+        gen_params = (length, count, allow_us, repeat)
         ok(f"Generating {count} random {length}-char usernames...")
         usernames = _generate(length, count, allow_us)
 
