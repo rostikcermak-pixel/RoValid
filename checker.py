@@ -110,7 +110,6 @@ async def _run_checker(cfg: RunConfig, settings: AppSettings) -> None:
     pm = ProxyManager(cfg.proxies, remove_on_fail=cfg.remove_bad_proxies, scored=cfg.scraped)
     stats = Stats()
     start_time = time.time()
-    proxyless = not cfg.proxies
 
     if cfg.concurrency > MAX_CONCURRENCY:
         cfg.concurrency = MAX_CONCURRENCY
@@ -166,8 +165,16 @@ async def _run_checker(cfg: RunConfig, settings: AppSettings) -> None:
         webhook = WebhookSender(cfg.webhook_url, cfg.webhook_message, session, start_time)
 
     # Duplicate names would each be screened and validated again for the same
-    # answer. dict.fromkeys drops them while preserving input order.
-    names = list(dict.fromkeys(cfg.usernames))
+    # answer. Roblox treats usernames case-insensitively - stage 1 already
+    # compares lowercased - so "Foo" and "foo" are one check, not two. Keep
+    # the first spelling seen so hits are reported as the user wrote them.
+    _seen: set[str] = set()
+    names = []
+    for _n in cfg.usernames:
+        _key = _n.lower()
+        if _key not in _seen:
+            _seen.add(_key)
+            names.append(_n)
     duplicates = len(cfg.usernames) - len(names)
     total_names = len(names)
 
@@ -340,8 +347,6 @@ async def _run_checker(cfg: RunConfig, settings: AppSettings) -> None:
                         feed.append(f"[{C.WARNING}]?[/] {name}")
 
                     state["validated"] += 1
-                    if proxyless:
-                        await asyncio.sleep(0.5)
 
             vtasks = [
                 asyncio.create_task(_validate_worker())
