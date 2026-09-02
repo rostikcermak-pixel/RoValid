@@ -223,6 +223,7 @@ class Stats:
     censored: int = 0
     invalid: int = 0             # rejected locally, never sent
     ratelimited: int = 0
+    fellback_chunks: int = 0     # stage-1 chunks that had to go to stage 2
     circuit_opens: int = 0
     rps: float = 0.0
     checks_rps: float = 0.0
@@ -263,6 +264,7 @@ class Stats:
             "censored": self.censored,
             "invalid": self.invalid,
             "ratelimited": self.ratelimited,
+            "fellback_chunks": self.fellback_chunks,
             "circuit_opens": self.circuit_opens,
             "rps": self.rps,
             "checks_rps": self.checks_rps,
