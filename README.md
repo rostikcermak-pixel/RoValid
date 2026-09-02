@@ -4,6 +4,10 @@
 
 No token, no login, no account needed — both endpoints it uses are public and unauthenticated.
 
+> **Playing Minecraft instead?** There's a Minecraft version on the
+> [`minecraft`](https://github.com/rostikcermak-pixel/RoValid/tree/minecraft)
+> branch — same tool, pointed at the Mojang API.
+
 ---
 
 ## Why it's fast
