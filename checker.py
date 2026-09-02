@@ -49,6 +49,7 @@ except (ImportError, AttributeError):  # pragma: no cover - non-Windows loops
 
 import argparse
 import asyncio
+import signal
 import sys
 import time
 from collections import deque
@@ -118,6 +119,57 @@ def parse_args() -> AppSettings:
 
 
 # ---------------------------------------------------------------------------
+# Graceful stop
+# ---------------------------------------------------------------------------
+
+class _StopRequest:
+    """Ctrl+C asks the run to wind down instead of killing it.
+
+    A KeyboardInterrupt out of asyncio.run() skips everything after the
+    worker loop - which is where the summary is printed and unresolved.txt
+    is written - so an interrupted run used to lose both. Hits were never at
+    risk (they are flushed as they are found), but the retry list was, and
+    that is the part you cannot reconstruct.
+
+    So the first Ctrl+C only sets a flag. The worker loop notices, cancels
+    what is still in flight, and falls through to the normal finalisation
+    path. A second Ctrl+C restores the default handler and kills the process
+    outright, for when winding down is itself the thing that is stuck.
+    """
+
+    def __init__(self) -> None:
+        self.requested = False
+        self._previous = None
+
+    def install(self) -> None:
+        try:
+            self._previous = signal.signal(signal.SIGINT, self._handle)
+        except (ValueError, OSError):
+            # Not the main thread, or no signal support - Ctrl+C then just
+            # behaves as it did before.
+            self._previous = None
+
+    def restore(self) -> None:
+        if self._previous is not None:
+            try:
+                signal.signal(signal.SIGINT, self._previous)
+            except (ValueError, OSError):
+                pass
+            self._previous = None
+
+    def _handle(self, signum, frame) -> None:
+        if self.requested:
+            self.restore()
+            raise KeyboardInterrupt
+        self.requested = True
+        console.print(
+            f"\n[{C.WARNING}]Stopping[/] "
+            f"[{C.MUTED}]- finishing what is in flight, then saving. "
+            f"Ctrl+C again to quit now.[/]"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Event-loop noise
 # ---------------------------------------------------------------------------
 
@@ -175,6 +227,7 @@ async def _run_checker(
     round_no: int = 1,
     cooldown=None,
     already_checked: set[str] | None = None,
+    stop: "_StopRequest | None" = None,
 ) -> int:
     """Two-stage checker with a live display. Returns the hit count.
 
@@ -270,6 +323,10 @@ async def _run_checker(
     recent_hits: deque[str] = deque(maxlen=16)
     feed: deque[str] = deque(maxlen=16)
     unresolved: list[str] = []
+    interrupted = False
+    # Created here rather than inside the run block so the finalisation path
+    # can drain whatever is still queued after an early stop.
+    cand_queue: asyncio.Queue[str | None] = asyncio.Queue()
 
     # Live-display state. Both stages now run concurrently, so screening and
     # validation progress are tracked separately and `stage` only decides
@@ -406,8 +463,6 @@ async def _run_checker(
                 if len(_stream_buf) >= STREAM_BATCH:
                     _stream_flush()
 
-            cand_queue: asyncio.Queue[str | None] = asyncio.Queue()
-
             def _enqueue(batch: list[str]) -> None:
                 for n in batch:
                     cand_queue.put_nowait(n)
@@ -516,6 +571,11 @@ async def _run_checker(
                         return
                     try:
                         outcome, code = await checker.validate(session, name)
+                    except asyncio.CancelledError:
+                        # Stopped mid-flight: this name has no answer either,
+                        # so it belongs in the retry list rather than nowhere.
+                        unresolved.append(name)
+                        raise
                     except Exception:
                         _stream(name, ERROR)
                         unresolved.append(name)
@@ -565,6 +625,15 @@ async def _run_checker(
                 _, pending = await asyncio.wait(pending, timeout=0.25)
                 _stream_flush()
                 live.update(_live_render())
+                if stop is not None and stop.requested and pending:
+                    # Wind down here rather than letting the interrupt unwind
+                    # the stack: everything below this block still needs to
+                    # run to save the summary and the retry list.
+                    for task in pending:
+                        task.cancel()
+                    await asyncio.wait(pending)
+                    interrupted = True
+                    break
             await asyncio.gather(*running, return_exceptions=True)
 
             _stream_flush()
@@ -592,8 +661,23 @@ async def _run_checker(
 
     # Names we could not resolve get written out so a re-run can retry
     # exactly those, instead of silently vanishing from the results.
+    if interrupted:
+        # Names still queued were never answered, so they belong in the retry
+        # list alongside the ones that failed - otherwise stopping early
+        # silently drops whatever had not been reached yet.
+        while not cand_queue.empty():
+            queued = cand_queue.get_nowait()
+            if queued is not None:
+                unresolved.append(queued)
+
     if unresolved:
         unresolved_path.write_text("\n".join(unresolved), encoding="utf-8")
+
+    if interrupted:
+        console.print(
+            f"[{C.WARNING}]Stopped early[/] "
+            f"[{C.MUTED}]- results below are what completed before the stop.[/]"
+        )
 
     if snap["fellback_chunks"]:
         console.print(
@@ -647,6 +731,9 @@ async def _run_rounds(cfg: RunConfig, settings: AppSettings) -> None:
     cooldown = SharedCooldown() if not cfg.proxies else None
     already: set[str] = set()
 
+    stop = _StopRequest()
+    stop.install()
+
     round_no = 1
     total_hits = 0
     while True:
@@ -662,9 +749,10 @@ async def _run_rounds(cfg: RunConfig, settings: AppSettings) -> None:
             round_no=round_no,
             cooldown=cooldown,
             already_checked=already if repeat else None,
+            stop=stop,
         )
 
-        if total_hits > 0 or not repeat:
+        if stop.requested or total_hits > 0 or not repeat:
             break
 
         # Draw a batch that has no overlap with what earlier rounds covered.
@@ -685,6 +773,8 @@ async def _run_rounds(cfg: RunConfig, settings: AppSettings) -> None:
 
         cfg.usernames = fresh
         round_no += 1
+
+    stop.restore()
 
     if repeat and round_no > 1:
         console.print(
