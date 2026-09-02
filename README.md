@@ -188,7 +188,12 @@ limit, and names an earlier round already checked are never re-checked.
 
 Results land in `results/hits.txt`, written the moment each hit is found.
 
-Flags: `--no-wizard` reuses your last setup, `--debug` logs every request, `--version`.
+Flags: `--no-wizard` reuses your last setup, `--debug` logs every request,
+`--stream` prints each check as it resolves above the live panel, `--version`.
+
+`--stream` renders at roughly 3,600 names/sec, so on a proxyless or modest
+proxied run it costs nothing - the network is slower than the rendering. It
+only becomes the bottleneck on a large pool pushing past that.
 
 ---
 

@@ -53,6 +53,11 @@ def set_debug(enabled: bool) -> None:
     _debug = enabled
 
 
+def debug_enabled() -> bool:
+    """True when --debug is active (callers use it to keep noise visible)."""
+    return _debug
+
+
 def dbg(*args, **kwargs) -> None:
     """Debug print - only when --debug is active."""
     if _debug:

@@ -178,6 +178,7 @@ class AppSettings:
     """Application-level settings (from CLI args)."""
     debug: bool = False
     no_wizard: bool = False
+    stream: bool = False     # -s: print every check above the live panel
 
 
 @dataclass
