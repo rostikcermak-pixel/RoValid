@@ -188,6 +188,10 @@ limit, and names an earlier round already checked are never re-checked.
 
 Results land in `results/hits.txt`, written the moment each hit is found.
 
+**Ctrl+C stops cleanly.** It finishes what is in flight, prints the summary, and
+writes every name it never got an answer for to `results/unresolved.txt` so you
+can re-run just those. Press it a second time to quit immediately instead.
+
 Each check prints above the live panel as it resolves - taken names dim out,
 hits show bright - with the stats staying pinned underneath. `--no-stream`
 turns it off.
