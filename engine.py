@@ -218,17 +218,16 @@ class SharedCooldown:
 # ---------------------------------------------------------------------------
 
 class RobloxChecker:
-    """Resolves Roblox username availability in two stages.
+    """Resolves Minecraft username availability.
 
-    Stage 1 (`batch_screen`) asks users.roblox.com which of up to 200 names
-    already belong to an account. That is a 200:1 compression versus checking
-    one name per request, which is what makes this workable without paid
-    proxies - Roblox's limiter allows only a couple of requests per IP burst,
-    but each of those requests clears 200 names.
+    `batch_screen` asks Mojang which of up to 10 names already belong to an
+    account. Ten is the API's hard cap, verified against the live endpoint:
+    eleven returns HTTP 400 naming the limit, and anything larger returns 413.
 
-    Stage 2 (`validate`) runs the signup validator over just the survivors.
-    It is the only stage that can see censored and reserved names: those have
-    no account behind them, so stage 1 reports them as free when they are not.
+    There is no second stage. Roblox exposes a signup validator that catches
+    censored and reserved names; Mojang exposes nothing equivalent, so a name
+    absent from the bulk reply is the whole answer available. The README
+    covers what that cannot rule out.
     """
 
     MAX_RETRIES = 20
@@ -415,7 +414,10 @@ class RobloxChecker:
         """
         attempt = 0
         started = time.time()
-        payload = {"usernames": names, "excludeBannedUsers": False}
+        # Mojang takes a bare JSON array, not an object, and answers with a
+        # list of the profiles that exist - so a name missing from the reply
+        # is one nobody holds.
+        payload = names
 
         while True:
             proxy = await self.pm.next()
@@ -462,9 +464,9 @@ class RobloxChecker:
                             if self._cooldown is not None:
                                 self._cooldown.succeed()
                             return {
-                                entry.get("requestedUsername", "").lower()
-                                for entry in data.get("data", [])
-                                if entry.get("requestedUsername")
+                                entry.get("name", "").lower()
+                                for entry in data
+                                if entry.get("name")
                             }
 
                         if resp.status == 400:

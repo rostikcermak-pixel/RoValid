@@ -62,6 +62,7 @@ from rich.text import Text
 import config as _config
 from config import (
     BATCH_MAX,
+    SINGLE_STAGE,
     DATA_DIR,
     LOGS_DIR,
     MAX_CONCURRENCY,
@@ -448,10 +449,10 @@ async def _run_checker(
                 # Taken is most of the traffic, so it stays dim and short -
                 # the wall greys out and the hits are what your eye catches.
                 if outcome == TAKEN:
-                    line.append(f"{name:<10}", _S_TAKEN)
+                    line.append(f"{name:<17}", _S_TAKEN)
                     line.append(label, _S_TAKEN)
                 else:
-                    line.append(f"{name:<10}", _S_NAME)
+                    line.append(f"{name:<17}", _S_NAME)
                     line.append(f"{label:<11}", style)
                     line.append(
                         f"{time.time() - start_time:6.0f}s "
@@ -528,15 +529,27 @@ async def _run_checker(
 
                         await _release()
                         if taken_set is None or taken_set is MALFORMED_CHUNK:
-                            # Out of stage-1 attempts, or a chunk the endpoint
-                            # will never accept. Stage 2 is the last resort.
-                            _enqueue(chunk)
                             stats.inc("fellback_chunks")
-                            feed.append(f"[{C.WARNING}]?[/] chunk -> stage 2")
+                            if SINGLE_STAGE:
+                                # Nothing to fall back to, so record the names
+                                # as unanswered rather than guessing either way.
+                                unresolved.extend(chunk)
+                                feed.append(f"[{C.WARNING}]?[/] chunk unresolved")
+                            else:
+                                _enqueue(chunk)
+                                feed.append(f"[{C.WARNING}]?[/] chunk -> stage 2")
                         else:
                             free = [n for n in chunk if n.lower() not in taken_set]
                             stats.inc_taken(len(chunk) - len(free))
-                            _enqueue(free)
+                            if SINGLE_STAGE:
+                                # Mojang has no validator to confirm against,
+                                # so absence from the bulk reply is the answer
+                                # and these are the hits.
+                                for _free in free:
+                                    await _record_hit(_free)
+                                    _stream(_free, AVAILABLE)
+                            else:
+                                _enqueue(free)
                         stats.inc("screened", len(chunk))
                         state["screened"] += len(chunk)
                         if settings.stream:
@@ -561,7 +574,8 @@ async def _run_checker(
             else:
                 # Validator-only mode: every name is a stage-2 candidate.
                 _enqueue(names)
-                state["stage"] = 2
+                if not SINGLE_STAGE:
+                    state["stage"] = 2
                 state["screened"] = total_names
 
             async def _validate_worker() -> None:
@@ -609,9 +623,10 @@ async def _run_checker(
                 """Once screening is done, tell the validators when to stop."""
                 if screen_tasks:
                     await asyncio.gather(*screen_tasks, return_exceptions=True)
-                    # Screening is over, so the panel switches to stage 2 and
-                    # the candidate total is final.
-                    state["stage"] = 2
+                    # Single stage here, so the panel keeps showing check
+                    # progress rather than flipping to a stage that has no work.
+                    if not SINGLE_STAGE:
+                        state["stage"] = 2
                 for _ in range(n_validators):
                     cand_queue.put_nowait(None)
 
@@ -681,10 +696,9 @@ async def _run_checker(
 
     if snap["fellback_chunks"]:
         console.print(
-            f"[{C.WARNING}]{snap['fellback_chunks']} chunks[/] could not be screened "
-            f"and fell through to stage 2 "
-            f"[{C.MUTED}](~{snap['fellback_chunks'] * BATCH_MAX} names checked one "
-            f"at a time - the pool could not keep up)[/]"
+            f"[{C.WARNING}]{snap['fellback_chunks']} chunks[/] could not be checked "
+            f"[{C.MUTED}](~{snap['fellback_chunks'] * BATCH_MAX} names went to "
+            f"unresolved.txt - the pool could not keep up)[/]"
         )
 
     final_summary(
