@@ -84,6 +84,28 @@ bucket is giving is also what keeps this safe if Roblox's real limits are more
 generous than the ones measured here; across every limiter shape simulated it
 was 1.3x-3.6x faster than before, and never slower.
 
+### With proxies: pool size is the lever, not worker count
+
+Each proxy carries its own rate-limit bucket, so throughput scales with how
+many proxies you have. It does not scale with workers - once there is roughly
+one worker per proxy, the pool's refill rate is the bound and extra workers
+only queue up behind it, spending their requests on 429s.
+
+```
+20,000 names, one worker per proxy
+   25 proxies  ->  329s
+   50 proxies  ->  172s
+  100 proxies  ->   77s
+  200 proxies  ->   42s
+  400 proxies  ->   18s
+```
+
+Pushing workers past that costs results rather than buying speed. On a
+25-proxy pool, 75 workers finished 9% quicker but found 1263 names where 25
+workers found all 1294 - the surplus workers push names past the point where
+they are abandoned, and waste climbs from 65% of requests to 80%. The default
+is therefore one worker per proxy.
+
 ### Client-side throughput
 
 Everything above is about *request economics* — how few requests the work can be

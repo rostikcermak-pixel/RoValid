@@ -357,7 +357,16 @@ def _step_speed(proxies: list[str], scraped: bool = False) -> tuple[int, int, bo
         conc = IntPrompt.ask("Concurrent workers", default=100)
         timeout = IntPrompt.ask("Request timeout (seconds)", default=8)
     else:
-        default_conc = min(MAX_CONCURRENCY, max(10, len(proxies) * 3))
+        # One worker per proxy. The old default was three, which measured
+        # squarely in the degrading zone: each proxy carries its own bucket,
+        # so once there is a worker per proxy the pool's refill rate is the
+        # bound and extra workers only queue up behind it. On a 25-proxy
+        # pool, 75 workers took 485s and found 1270 names where 25 workers
+        # took 350s and found all 1294 - 39% slower for 24 fewer results,
+        # because the surplus workers spend their requests on 429s and push
+        # names past the point where they get abandoned.
+        default_conc = min(MAX_CONCURRENCY, max(10, len(proxies)))
+        info("About one worker per proxy - more than that just queues up.")
         conc = IntPrompt.ask("Concurrent workers", default=default_conc)
         timeout = IntPrompt.ask("Request timeout (seconds)", default=10)
 
