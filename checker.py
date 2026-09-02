@@ -74,6 +74,7 @@ from config import (
 )
 from engine import (
     AVAILABLE,
+    ERROR,
     MALFORMED_CHUNK,
     CENSORED,
     EXHAUSTED,
@@ -82,6 +83,7 @@ from engine import (
     CircuitBreaker,
     RobloxChecker,
     WebhookSender,
+    debug_enabled as _debug_enabled,
     set_debug,
 )
 from proxy import ProxyManager
@@ -101,10 +103,46 @@ def parse_args() -> AppSettings:
                         help="Enable debug output (request/response logs)")
     parser.add_argument("-n", "--no-wizard", action="store_true",
                         help="Skip setup wizard - use saved config and files")
+    parser.add_argument("-s", "--stream", action="store_true",
+                        help="Print every check as it resolves, above the "
+                             "live panel (costs some throughput)")
     parser.add_argument("--version", action="version",
                         version=f"RoValid v{_config.VERSION}")
     args = parser.parse_args()
-    return AppSettings(debug=args.debug, no_wizard=args.no_wizard)
+    return AppSettings(debug=args.debug, no_wizard=args.no_wizard,
+                       stream=args.stream)
+
+
+# ---------------------------------------------------------------------------
+# Event-loop noise
+# ---------------------------------------------------------------------------
+
+def _quiet_unclosed_connections() -> None:
+    """Drop aiohttp's "Unclosed connection" notices from the event loop.
+
+    aiohttp reports these from Connection.__del__ - a garbage-collector hook
+    that also calls _release(should_close=True), so the socket is already
+    being tidied by the time the notice is emitted, and the response it
+    carried was read long before. Roblox and free proxies both drop idle
+    sockets constantly, so a big run prints thousands of them and buries the
+    output that matters.
+
+    Only this one message is filtered; everything else still reaches the
+    default handler, and --debug turns the filter off so nothing is hidden
+    when you are actually looking for a fault.
+    """
+    if _debug_enabled():
+        return
+    loop = asyncio.get_running_loop()
+
+    def handler(lp, context):
+        if context.get("message") in (
+            "Unclosed connection", "Unclosed client session",
+        ):
+            return
+        lp.default_exception_handler(context)
+
+    loop.set_exception_handler(handler)
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +177,8 @@ async def _run_checker(
     `cooldown` and `already_checked` are carried across repeat rounds so a
     later round neither re-learns the rate limit nor re-checks a name.
     """
+
+    _quiet_unclosed_connections()
 
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
     hits_path = RESULTS_DIR / "hits.txt"
@@ -303,6 +343,31 @@ async def _run_checker(
             # an empty queue, which is also what keeps the combined request
             # rate honest early on: they only go wide once there is a backlog
             # to go wide on.
+            # --stream: one line per resolved name, printed above the live
+            # panel. rich moves the panel down as lines arrive, so the effect
+            # is a scrolling log with the stats pinned underneath.
+            _mark = {
+                AVAILABLE: (f"[{C.SUCCESS}]", "+", "AVAILABLE"),
+                TAKEN:     (f"[{C.DANGER}]",  "-", "taken"),
+                CENSORED:  (f"[{C.WARNING}]", "c", "censored"),
+                INVALID:   (f"[{C.MUTED}]",   "x", "invalid"),
+            }
+
+            def _stream(name: str, outcome: str) -> None:
+                if not settings.stream:
+                    return
+                colour, icon, label = _mark.get(
+                    outcome, (f"[{C.WARNING}]", "?", "unresolved"),
+                )
+                live.console.print(
+                    f"{colour}{icon}[/] "
+                    f"[{C.MUTED}]{time.time() - start_time:7.1f}s[/] "
+                    f"{name:<12} {colour}{label:<10}[/] "
+                    f"[{C.MUTED}]{stats.requests:>9,} req  "
+                    f"{stats.rps:>5.0f}/s  {pm.alive_count:>5} px[/]",
+                    highlight=False, markup=True,
+                )
+
             cand_queue: asyncio.Queue[str | None] = asyncio.Queue()
 
             def _enqueue(batch: list[str]) -> None:
@@ -381,6 +446,16 @@ async def _run_checker(
                             _enqueue(free)
                         stats.inc("screened", len(chunk))
                         state["screened"] += len(chunk)
+                        if settings.stream:
+                            live.console.print(
+                                f"[{C.PRIMARY}]#[/] "
+                                f"[{C.MUTED}]{time.time() - start_time:7.1f}s[/] "
+                                f"screened {len(chunk):<4} "
+                                f"[{C.MUTED}]{state['screened']:>9,}/"
+                                f"{state['screen_total']:,}  "
+                                f"{stats.rps:>5.0f}/s[/]",
+                                highlight=False, markup=True,
+                            )
 
                 n_screeners = min(len(chunks), max(1, cfg.concurrency))
                 screen_tasks = [
@@ -401,9 +476,12 @@ async def _run_checker(
                     try:
                         outcome, code = await checker.validate(session, name)
                     except Exception:
+                        _stream(name, ERROR)
                         unresolved.append(name)
                         state["validated"] += 1
                         continue
+
+                    _stream(name, outcome)
 
                     if outcome == AVAILABLE:
                         await _record_hit(name)
