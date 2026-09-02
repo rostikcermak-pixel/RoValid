@@ -74,6 +74,7 @@ from config import (
 )
 from engine import (
     AVAILABLE,
+    MALFORMED_CHUNK,
     CENSORED,
     EXHAUSTED,
     INVALID,
@@ -120,6 +121,10 @@ async def _rps_calculator(stats: Stats, stop_event: asyncio.Event) -> None:
 # ---------------------------------------------------------------------------
 # Main runner
 # ---------------------------------------------------------------------------
+
+# Stage-1 attempts on one chunk before giving up and paying stage-2 prices.
+MAX_CHUNK_TRIES = 5
+
 
 async def _run_checker(
     cfg: RunConfig,
@@ -318,29 +323,58 @@ async def _run_checker(
             if cfg.two_stage:
                 chunks = [names[i:i + BATCH_MAX] for i in range(0, len(names), BATCH_MAX)]
 
-                chunk_idx = 0
+                # A chunk that fails screening goes back for another stage-1
+                # attempt rather than straight to stage 2. Screening a chunk
+                # again costs one request; handing its 200 names to stage 2
+                # costs 200 - so falling back on the first failure multiplies
+                # the load by 200 at exactly the moment the endpoint is
+                # already refusing us, and the extra stage-2 traffic then
+                # makes more chunks fail. A live 4-char run showed it: 8,398
+                # cheap requests turned into 1.17 million expensive ones.
+                chunk_queue = deque((c, 0) for c in chunks)
+                inflight = 0
                 idx_lock = asyncio.Lock()
 
-                async def _next_chunk():
-                    nonlocal chunk_idx
+                async def _take_chunk():
+                    """Next (chunk, tries), or None once nothing is left."""
+                    nonlocal inflight
+                    while True:
+                        async with idx_lock:
+                            if chunk_queue:
+                                inflight += 1
+                                return chunk_queue.popleft()
+                            if inflight == 0:
+                                return None
+                        # Chunks are still out; one may come back for a retry,
+                        # so wait rather than exiting the worker.
+                        await asyncio.sleep(0.05)
+
+                async def _release(retry=None) -> None:
+                    nonlocal inflight
                     async with idx_lock:
-                        if chunk_idx >= len(chunks):
-                            return None
-                        c = chunks[chunk_idx]
-                        chunk_idx += 1
-                        return c
+                        inflight -= 1
+                        if retry is not None:
+                            chunk_queue.append(retry)
 
                 async def _screen_worker() -> None:
                     while True:
-                        chunk = await _next_chunk()
-                        if chunk is None:
+                        item = await _take_chunk()
+                        if item is None:
                             return
+                        chunk, tries = item
                         taken_set = await checker.batch_screen(session, chunk)
-                        if taken_set is None:
-                            # Could not resolve - hand the whole chunk to
-                            # stage 2 rather than guessing they are free.
+
+                        if taken_set is None and tries + 1 < MAX_CHUNK_TRIES:
+                            await _release((chunk, tries + 1))
+                            continue
+
+                        await _release()
+                        if taken_set is None or taken_set is MALFORMED_CHUNK:
+                            # Out of stage-1 attempts, or a chunk the endpoint
+                            # will never accept. Stage 2 is the last resort.
                             _enqueue(chunk)
-                            feed.append(f"[{C.WARNING}]?[/] chunk unresolved")
+                            stats.inc("fellback_chunks")
+                            feed.append(f"[{C.WARNING}]?[/] chunk -> stage 2")
                         else:
                             free = [n for n in chunk if n.lower() not in taken_set]
                             stats.inc_taken(len(chunk) - len(free))
@@ -439,6 +473,14 @@ async def _run_checker(
     # exactly those, instead of silently vanishing from the results.
     if unresolved:
         unresolved_path.write_text("\n".join(unresolved), encoding="utf-8")
+
+    if snap["fellback_chunks"]:
+        console.print(
+            f"[{C.WARNING}]{snap['fellback_chunks']} chunks[/] could not be screened "
+            f"and fell through to stage 2 "
+            f"[{C.MUTED}](~{snap['fellback_chunks'] * BATCH_MAX} names checked one "
+            f"at a time - the pool could not keep up)[/]"
+        )
 
     final_summary(
         requests=snap["requests"],

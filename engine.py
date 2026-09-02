@@ -28,6 +28,11 @@ _JSON_HEADERS = {"Content-Type": "application/json"}
 # Outcomes
 # ---------------------------------------------------------------------------
 
+# batch_screen returns this instead of None when the chunk itself is the
+# problem (HTTP 400). A transient failure is worth retrying in stage 1,
+# which costs one request; a malformed chunk never will be.
+MALFORMED_CHUNK = object()
+
 AVAILABLE = "available"
 TAKEN = "taken"
 CENSORED = "censored"
@@ -391,12 +396,17 @@ class RobloxChecker:
         self,
         session: aiohttp.ClientSession,
         names: list[str],
-    ) -> set[str] | None:
+    ):
         """Return the lowercased subset of *names* that already exist.
 
-        Returns None if the chunk could not be resolved (retries exhausted or
-        no proxies left), so the caller can fall back rather than silently
-        treating every name in the chunk as free.
+        Returns None when the chunk could not be resolved this time - retries
+        exhausted, no proxy free, budget spent. That is transient, and the
+        caller should try the chunk again in stage 1 rather than fall back:
+        re-screening costs one request, whereas handing 200 names to stage 2
+        costs 200, and doing that under load makes the load worse.
+
+        Returns MALFORMED_CHUNK when the endpoint rejected the chunk itself
+        (HTTP 400), which no amount of retrying will fix.
         """
         attempt = 0
         started = time.time()
@@ -453,9 +463,9 @@ class RobloxChecker:
                             }
 
                         if resp.status == 400:
-                            # Malformed chunk - caller falls back to stage 2.
+                            # The chunk itself is bad; retrying cannot help.
                             dbg(f"  [batch] HTTP 400: {(await resp.text())[:120]}")
-                            return None
+                            return MALFORMED_CHUNK
 
                         if resp.status == 429:
                             backoff = await self._handle_429(resp, proxy, attempt)
