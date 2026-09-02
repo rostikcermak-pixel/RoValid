@@ -322,6 +322,10 @@ async def _run_checker(
     # keeps a long run from accumulating a list entry per name checked.
     recent_hits: deque[str] = deque(maxlen=16)
     feed: deque[str] = deque(maxlen=16)
+    # Sampled once per render tick to drive the panel's sparkline. A single
+    # live number tells you the rate; the history tells you whether you are
+    # speeding up or being throttled, which is the more useful of the two.
+    rps_history: deque[float] = deque(maxlen=16)
     unresolved: list[str] = []
     interrupted = False
     # Created here rather than inside the run block so the finalisation path
@@ -340,6 +344,7 @@ async def _run_checker(
     }
 
     def _live_render():
+        rps_history.append(stats.rps)
         if state["stage"] == 1:
             done, total = state["screened"], state["screen_total"]
         else:
@@ -363,6 +368,7 @@ async def _run_checker(
             paused=paused,
             recent=list(recent_hits),
             feed=list(feed),
+            rps_history=list(rps_history),
         )
 
     stop_rps = asyncio.Event()
@@ -423,11 +429,20 @@ async def _run_checker(
             _S_NAME = Style(bold=True)
 
             _look = {
-                AVAILABLE: ("+", "AVAILABLE", _S_HIT),
-                TAKEN:     ("·", "taken",     _S_TAKEN),
-                CENSORED:  ("c", "censored",  _S_CENSORED),
-                INVALID:   ("x", "invalid",   _S_DIM),
+                TAKEN:    ("·", "taken",      _S_TAKEN),
+                CENSORED: ("•", "censored",   _S_CENSORED),
+                INVALID:  ("×", "invalid",    _S_DIM),
             }
+
+            # A hit is the whole point of watching this run, so it does not
+            # get a line like every other outcome - it gets a slab. Reverse
+            # video across the full width is the one treatment that still
+            # reads once the terminal has been shrunk into a phone-sized
+            # video frame; a coloured line just becomes a slightly brighter
+            # row in a grey wall.
+            _S_SLAB = Style(color="#0B0B0C", bgcolor=C.SUCCESS, bold=True)
+            _S_SLAB_TAIL = Style(color=C.SUCCESS, bold=True)
+            _SLAB_WIDTH = 52
             _stream_buf: list[Text] = []
             STREAM_BATCH = 16
 
@@ -440,10 +455,27 @@ async def _run_checker(
             def _stream(name: str, outcome: str) -> None:
                 if not settings.stream:
                     return
+                line = Text(no_wrap=True, end="")
+
+                if outcome == AVAILABLE:
+                    line.append(
+                        f"  ✦  AVAILABLE   {name}".ljust(_SLAB_WIDTH),
+                        _S_SLAB,
+                    )
+                    line.append(
+                        f"  #{stats.works:,} · {time.time() - start_time:.0f}s ",
+                        _S_SLAB_TAIL,
+                    )
+                    _stream_buf.append(line)
+                    # Flush immediately: the hit is the moment worth seeing,
+                    # and buffering it behind fifteen "taken" lines is what
+                    # made it land late on screen.
+                    _stream_flush()
+                    return
+
                 icon, label, style = _look.get(
                     outcome, ("?", "unresolved", _S_UNKNOWN),
                 )
-                line = Text(no_wrap=True, end="")
                 line.append(f" {icon} ", style)
                 # Taken is most of the traffic, so it stays dim and short -
                 # the wall greys out and the hits are what your eye catches.
