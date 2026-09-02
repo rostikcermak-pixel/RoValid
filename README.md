@@ -1,8 +1,12 @@
-# RoValid
+# RoValid — Minecraft
 
-**Roblox username availability checker.** Async, proxy-optional, two-stage.
+**Minecraft username availability checker.** Async, proxy-optional.
 
-No token, no login, no account needed — both endpoints it uses are public and unauthenticated.
+No account, no token, no login — the Mojang endpoint it uses is public and
+unauthenticated.
+
+> This is the **Minecraft** branch. The original Roblox version lives on
+> [`main`](https://github.com/rostikcermak-pixel/RoValid).
 
 > **Playing Minecraft instead?** There's a Minecraft version on the
 > [`minecraft`](https://github.com/rostikcermak-pixel/RoValid/tree/minecraft)
@@ -10,137 +14,34 @@ No token, no login, no account needed — both endpoints it uses are public and 
 
 ---
 
-## Why it's fast
+## How it works
 
-A naive checker sends one request per username. Roblox's rate limiter allows only
-a couple of requests per IP before throttling, so that approach needs a large paid
-proxy pool to get anywhere.
+One endpoint, one stage:
 
-RoValid checks **200 names per request** instead, using a bulk endpoint, then only
-falls back to per-name checks for the handful that survive:
+| Endpoint | Cost | What it answers |
+|---|---|---|
+| `api.mojang.com/profiles/minecraft` | 10 names / request | Does an account already hold this name? |
 
-| Stage | Endpoint | Cost | What it answers |
-|---|---|---|---|
-| 1 — screen | `users.roblox.com/v1/usernames/users` | 200 names / request | Does an account already hold this name? |
-| 2 — confirm | `auth.roblox.com/v1/usernames/validate` | 1 name / request | Can it actually be registered? |
+You POST an array of usernames and Mojang returns only the ones that exist, so
+anything missing from the reply has no account behind it.
 
-**Stage 2 is not optional.** Censored and reserved names have no account behind them,
-so stage 1 reports them as free when they are not. A batch-only checker gets these
-wrong. Stage 1 narrows the field; stage 2 is what makes the answer trustworthy.
+**Ten is a hard cap**, verified against the live API: eleven names returns
+HTTP 400 (`size must be between 1 and 10`) and anything larger returns HTTP
+413. That is the main difference from the Roblox version, which clears 200
+names per request — so expect roughly 20x more requests for the same list.
 
-### Measured, proxyless
+### What this cannot tell you
 
-Two regimes, and which one you land in depends entirely on how many names
-survive stage 1:
+The Roblox version has a second stage, because Roblox exposes a signup
+validator that catches censored and reserved names. **Mojang exposes no
+equivalent**, so "no account holds this" is the whole answer available here,
+and a name can still be unregisterable for reasons the API will not show you:
 
-```
-3,000 four-char names, almost all already registered
-  stage 1:  2,599 resolved in  54 batched requests
-  stage 2:    401 survivors in 401 single requests   <-- the cost
-  total:    464s  (6.5 names/sec)
+- names blocked or reserved by Mojang
+- names in the ~37-day cooldown after being freed by a rename
 
-800 four-char names, none surviving stage 1
-  stage 1:    800 resolved in  10 batched requests
-  stage 2:      0 survivors
-  total:     26s  (31 names/sec)
-```
-
-Stage 1 is cheap and scales beautifully. **Stage 2 is one request per surviving
-name and cannot be batched** — Roblox exposes no bulk validator. So the honest
-rule is: your runtime is roughly *(number of stage-2 candidates) x (your
-per-request rate)*, and everything stage 1 eliminates is nearly free.
-
-Proxyless, Roblox allows about three requests before throttling, then reopens
-roughly six seconds after you stop hammering. That is a hard ceiling of roughly
-1,800 stage-2 confirmations per hour on one IP, and RoValid now runs close to
-it (see below) rather than at the ~25% of it that blind retrying managed.
-
-**If stage 2 has more than ~100 candidates, use proxies.** Each proxy carries
-its own rate-limit bucket, and that is the only thing that lifts this ceiling.
-Free scraped proxies are enough — see below.
-
-### Proxyless: don't fight the rate limiter
-
-The important half of Roblox's proxyless limiter is easy to miss: the reopen
-timer starts when the bucket **empties**, and a request arriving while it is
-shut pushes that timer back. Retrying into a closed bucket therefore spends a
-real request to rediscover a limit you already know about, *and* delays the
-reopen. Measured against that limiter, the old blind-retry policy wasted 42%
-of every request it sent and ran at about a quarter of the achievable rate:
-
-```
-400 names, proxyless, 2 workers
-  before:  397s   (85 requests, 34 of them 429s)
-  after:   108s   (83 requests, 32 of them 429s)
-```
-
-Almost the same number of 429s - what changed is what each one costs. Every
-worker now parks on one shared resume time taken from the server's own
-`Retry-After`, instead of each backing off on its own schedule escalating
-from 7s toward 45s keyed to a per-name attempt counter. That lands within
-about 1.05x of the theoretical best the bucket allows.
-
-Note what this deliberately does *not* do: it never paces sends proactively.
-Spacing requests evenly is worse here, not better - a steady trickle into a
-bucket whose clock keeps resetting can starve indefinitely, and in simulation
-even spacing failed to finish at any interval tried. Sending freely while the
-bucket is giving is also what keeps this safe if Roblox's real limits are more
-generous than the ones measured here; across every limiter shape simulated it
-was 1.3x-3.6x faster than before, and never slower.
-
-### With proxies: pool size is the lever, not worker count
-
-Each proxy carries its own rate-limit bucket, so throughput scales with how
-many proxies you have. It does not scale with workers - once there is roughly
-one worker per proxy, the pool's refill rate is the bound and extra workers
-only queue up behind it, spending their requests on 429s.
-
-```
-20,000 names, one worker per proxy
-   25 proxies  ->  329s
-   50 proxies  ->  172s
-  100 proxies  ->   77s
-  200 proxies  ->   42s
-  400 proxies  ->   18s
-```
-
-Pushing workers past that costs results rather than buying speed. On a
-25-proxy pool, 75 workers finished 9% quicker but found 1263 names where 25
-workers found all 1294 - the surplus workers push names past the point where
-they are abandoned, and waste climbs from 65% of requests to 80%. The default
-is therefore one worker per proxy.
-
-### Client-side throughput
-
-Everything above is about *request economics* — how few requests the work can be
-done in. Separately, the client has to be able to issue them fast enough to keep
-the proxy pool busy, and with a large scraped pool that is where the real
-ceiling used to sit:
-
-```
-200,000 names, 200 workers, 5,000 scraped proxies, 50ms simulated latency
-  before:  22.5s   (8,900 names/sec)
-  after:    3.4s  (58,200 names/sec)
-```
-
-Identical results either way — the same 11,248 hits. The difference is all
-client-side scheduling:
-
-- **Proxy selection was O(pool) per request.** Every single request rebuilt a
-  filtered dict over the whole pool and did a linear weighted pick, so a
-  5,000-proxy pool capped the process at roughly 1,100 selections/sec of pure
-  event-loop CPU — well below what the pool could actually sustain. It now
-  picks by bisect against a table rebuilt at most twice a second (and
-  immediately when a cooldown lapses), which measures ~370x faster.
-- **The stats counters held an asyncio lock** for every increment, two or three
-  per request, on a single-threaded event loop where the lock protected nothing.
-- **Stage 1 and stage 2 now overlap.** Screening publishes survivors to a queue
-  that validation drains as they arrive, instead of stage 2 waiting for the last
-  chunk to be screened. Both stages draw from one shared in-flight request
-  budget, so the concurrency you set is still the concurrency you get.
-- Duplicate input names are dropped (case-insensitively, since Roblox treats
-  usernames that way), sockets are kept alive across the run, and local
-  username validation is a single set operation.
+So treat a hit as *probably* available rather than confirmed. The only way to
+know for certain is to try to claim it.
 
 ---
 
@@ -180,7 +81,8 @@ Or `./run.sh`.
 The wizard asks four things. Pressing Enter through all of them is a valid run:
 
 1. **Proxies** — choose `n` (none). You do not need them.
-2. **Usernames** — `g` to generate, pick a length, pick how many.
+2. **Usernames** — `g` to generate, pick a length (3-16 allowed, the wizard
+   offers 3-8), pick how many.
 3. **Speed** — accept the defaults.
 4. **Webhook** — `n` unless you want Discord notifications.
 
@@ -195,6 +97,9 @@ Results land in `results/hits.txt`, written the moment each hit is found.
 **Ctrl+C stops cleanly.** It finishes what is in flight, prints the summary, and
 writes every name it never got an answer for to `results/unresolved.txt` so you
 can re-run just those. Press it a second time to quit immediately instead.
+
+**Minecraft username rules:** 3-16 characters, `a-z A-Z 0-9 _`. Unlike Roblox
+there is no limit on underscores and they may sit at either end.
 
 Each check prints above the live panel as it resolves - taken names dim out,
 hits show bright - with the stats staying pinned underneath. `--no-stream`

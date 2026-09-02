@@ -22,33 +22,39 @@ RESULTS_DIR = PROJECT_ROOT / "results"
 # Roblox API
 # ---------------------------------------------------------------------------
 
-VERSION = "1.0.0"
+VERSION = "1.0.0-mc"
+GAME = "Minecraft"
 
-# Stage 1: bulk existence lookup. Returns only usernames that EXIST.
-# Verified cap: 200 names per request (300+ -> HTTP 400 "Too many usernames").
-BATCH_ENDPOINT = "https://users.roblox.com/v1/usernames/users"
-BATCH_MAX = 200
+# Bulk existence lookup. Returns only the usernames that EXIST, so anything
+# absent from the response has no account behind it.
+#
+# Verified against the live API: the cap is 10 names per request. 11 returns
+# HTTP 400 "getProfileName.profileNames: size must be between 1 and 10", and
+# 25+ returns HTTP 413. That is 20x less compression than Roblox's 200, which
+# is the single biggest difference between the two versions.
+BATCH_ENDPOINT = "https://api.mojang.com/profiles/minecraft"
+BATCH_MAX = 10
 
-# Stage 2: signup validator. Catches censored/reserved names that stage 1
-# cannot see, because no *user* holds them but they still can't be registered.
-VALIDATE_ENDPOINT = "https://auth.roblox.com/v1/usernames/validate"
-VALIDATE_BIRTHDAY = "2000-01-01T00:00:00.000Z"
-VALIDATE_CONTEXT = "Signup"
+# Mojang has no signup validator to check against, so there is no second
+# stage: a name missing from the bulk response is the answer. See SINGLE_STAGE
+# in the README for what that cannot tell you.
+SINGLE_STAGE = True
 
-# Response codes returned by VALIDATE_ENDPOINT (all under HTTP 200).
-CODE_AVAILABLE = 0   # "Username is valid"
-CODE_TAKEN     = 1   # "Username is already in use"
-CODE_CENSORED  = 2   # "Username not appropriate for Roblox"
-CODE_LENGTH    = 3   # "Usernames can be 3 to 20 characters long"
-CODE_EDGE_US   = 4   # "Username can't start or end with _"
-CODE_MULTI_US  = 5   # "Usernames can have at most one _"
-CODE_CHARSET   = 7   # "Only a-z, A-Z, 0-9, and _ are allowed"
+# Kept so the shared engine still imports; unused when SINGLE_STAGE is on.
+VALIDATE_ENDPOINT = "https://api.mojang.com/users/profiles/minecraft/"
+VALIDATE_BIRTHDAY = ""
+VALIDATE_CONTEXT = ""
+CODE_AVAILABLE = 0
+CODE_TAKEN     = 1
+CODE_CENSORED  = 2
 
-# Roblox username rules (enforced locally to avoid wasted requests)
+# Minecraft username rules (enforced locally to avoid wasted requests):
+# 3-16 characters, a-z A-Z 0-9 and underscore, with no restriction on how
+# many underscores or where they sit.
 MIN_LEN = 3
-MAX_LEN = 20
+MAX_LEN = 16
 USERNAME_CHARS = string.ascii_lowercase + string.digits + "_"
-MAX_UNDERSCORES = 1
+MAX_UNDERSCORES = MAX_LEN
 
 MAX_CONCURRENCY = 2000  # hard cap - beyond this asyncio/aiohttp stalls
 
@@ -108,17 +114,13 @@ def is_valid_username(name: str) -> bool:
     Every rule here maps to a validator response code, so filtering locally
     means we never spend a request learning something we already knew:
 
-    - 3-20 characters                     (code 3)
-    - only a-z, A-Z, 0-9, '_'             (code 7)
-    - at most one '_'                     (code 5)
-    - cannot start or end with '_'        (code 4)
+    - 3-16 characters
+    - only a-z, A-Z, 0-9 and '_'
+
+    Unlike Roblox, Minecraft puts no limit on underscores and allows them at
+    the edges, so those two checks are gone.
     """
     if not (MIN_LEN <= len(name) <= MAX_LEN):
-        return False
-    # Length is >= MIN_LEN here, so indexing the edges is safe.
-    if name[0] == "_" or name[-1] == "_":
-        return False
-    if name.count("_") > MAX_UNDERSCORES:
         return False
     return _ALLOWED_CHARS.issuperset(name)
 
@@ -127,12 +129,8 @@ def invalid_reason(name: str) -> str:
     """Human-readable reason a username fails local validation."""
     if not (MIN_LEN <= len(name) <= MAX_LEN):
         return f"length {len(name)} (must be {MIN_LEN}-{MAX_LEN})"
-    if not all(c.isascii() and (c.isalnum() or c == "_") for c in name):
+    if not _ALLOWED_CHARS.issuperset(name):
         return "illegal character"
-    if name.count("_") > MAX_UNDERSCORES:
-        return "more than one underscore"
-    if name.startswith("_") or name.endswith("_"):
-        return "leading/trailing underscore"
     return "unknown"
 
 

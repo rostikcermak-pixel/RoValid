@@ -22,7 +22,7 @@ def banner() -> Panel:
     inner = Text()
     inner.append("RoValid", style=f"bold {C.PRIMARY}")
     inner.append(f"  v{VERSION}", style=C.MUTED)
-    inner.append("\nRoblox username availability checker", style=C.MUTED)
+    inner.append("\nMinecraft username availability checker", style=C.MUTED)
     return Panel(inner, box=box.ROUNDED, border_style=C.BORDER, padding=(1, 4))
 
 
@@ -97,8 +97,7 @@ def config_summary(
     t.add_row("Usernames", str(username_count))
     if invalid_count:
         t.add_row("Skipped", f"[{C.MUTED}]{invalid_count} invalid (Roblox rules)[/]")
-    t.add_row("Mode", f"[{C.SUCCESS}]2-stage (fast)[/]" if two_stage
-              else f"[{C.WARNING}]validator only (slow)[/]")
+    t.add_row("Mode", f"[{C.SUCCESS}]bulk (10 names/request)[/]")
     t.add_row("Workers", str(concurrency))
     t.add_row("Timeout", f"{timeout}s")
     t.add_row("Webhook", f"[{C.SUCCESS}]on[/]" if webhook else f"[{C.MUTED}]off[/]")
@@ -133,7 +132,8 @@ def live_card(
     """Build the live display panel."""
 
     pct = stage_done / max(stage_total, 1) * 100
-    stage_name = "Screening" if stage == 1 else "Validating"
+    # One stage here: Mojang has no validator to confirm against.
+    stage_name = "Checking"
 
     inner = Table(box=None, show_header=False, padding=(0, 1), expand=True)
     inner.add_column(style=C.MUTED, width=14, no_wrap=True)
@@ -149,16 +149,10 @@ def live_card(
         "Req/s", f"[{C.PRIMARY}]{rps:.0f}[/]",
         "Requests", str(requests),
     )
-    if stage == 1:
-        inner.add_row(
-            "Screened", f"{stage_done}/{stage_total} ({pct:.0f}%)",
-            "Batches", str(batch_requests),
-        )
-    else:
-        inner.add_row(
-            "Validated", f"{stage_done}/{stage_total} ({pct:.0f}%)",
-            "Censored", f"[{C.WARNING}]{censored}[/]" if censored else "0",
-        )
+    inner.add_row(
+        "Checked", f"{stage_done}/{stage_total} ({pct:.0f}%)",
+        "Batches", str(batch_requests),
+    )
 
     if ratelimited > 0:
         inner.add_row(
@@ -173,13 +167,6 @@ def live_card(
 
     content = Table(box=None, show_header=False, padding=(0, 0), expand=True)
     content.add_row(inner)
-
-    if stage == 1 and candidates:
-        content.add_section()
-        content.add_row(Text(
-            f"{candidates} candidates survived screening -> stage 2 is confirming them",
-            style=C.MUTED,
-        ))
 
     if paused:
         content.add_section()
@@ -199,9 +186,9 @@ def live_card(
 
     return Panel(
         content,
-        title=f"[{C.PRIMARY}]RoValid[/] · "
+        title=f"[{C.PRIMARY}]RoValid[/] [dim]Minecraft[/] · "
               + (f"Round {round_no} · " if round_no > 1 else "")
-              + f"Stage {stage}/2 {stage_name} · "
+              + f"{stage_name} · "
                 f"{stage_done}/{stage_total} ({pct:.0f}%) · [dim]{elapsed:.0f}s[/]",
         title_align="left",
         box=box.ROUNDED,

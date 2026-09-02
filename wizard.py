@@ -77,8 +77,8 @@ async def setup_wizard(config: Config, settings: AppSettings) -> RunConfig:
     # ── Step 1: Proxies ──
     info_card(
         f"[{C.PRIMARY}]Proxies are optional here.[/]",
-        f"[{C.MUTED}]Stage 1 checks 200 names per request, so even proxyless[/]",
-        f"[{C.MUTED}]runs clear a few hundred names per burst.[/]",
+        f"[{C.MUTED}]Mojang allows 10 names per request, so a proxyless run[/]",
+        f"[{C.MUTED}]is slower here than the Roblox version - proxies help a lot.[/]",
         f"[{C.MUTED}]Format: login:pass@host:port[/]",
     )
     proxies, remove_bad, scraped = await _step_proxies(config)
@@ -298,7 +298,7 @@ def _step_usernames() -> tuple[list[str], int, tuple[int, int, bool, bool] | Non
             default=False,
         )
         length = IntPrompt.ask(
-            "Username length", default=5, choices=["3", "4", "5", "6"],
+            "Username length", default=6, choices=["3", "4", "5", "6", "7", "8"],
         )
         if repeat:
             info("Rounds run until a hit; below is the batch size for each one.")
@@ -336,18 +336,11 @@ def _step_usernames() -> tuple[list[str], int, tuple[int, int, bool, bool] | Non
 def _step_speed(proxies: list[str], scraped: bool = False) -> tuple[int, int, bool]:
     """Returns (concurrency, timeout, two_stage)."""
 
-    two_stage = Confirm.ask(
-        f"Use fast 2-stage mode? [dim](200 names/request screen, then confirm)[/]",
-        default=True,
-    )
-    if not two_stage:
-        warn_card(
-            f"[{C.WARNING}]Validator-only mode is ~200x more requests.[/]",
-            f"[{C.MUTED}]Only worth it if you distrust the bulk endpoint.[/]",
-        )
+    # Mojang exposes no validator, so there is only one way to check.
+    two_stage = True
 
     if not proxies:
-        info("Proxyless - a couple of workers is all Roblox will accept.")
+        info("Proxyless - keep this low; Mojang throttles by IP too.")
         conc = IntPrompt.ask("Concurrent workers", default=2)
         timeout = IntPrompt.ask("Request timeout (seconds)", default=15)
         return max(1, conc), timeout, two_stage
