@@ -51,9 +51,15 @@ rule is: your runtime is roughly *(number of stage-2 candidates) x (your
 per-request rate)*, and everything stage 1 eliminates is nearly free.
 
 Proxyless, Roblox allows about three requests before throttling, then reopens
-roughly six seconds after you stop hammering. That is a hard ceiling of roughly
-1,800 stage-2 confirmations per hour on one IP, and RoValid now runs close to
-it (see below) rather than at the ~25% of it that blind retrying managed.
+roughly six seconds after you stop hammering — *on the batch endpoint*. RoValid
+now runs close to that rather than at the ~25% of it that blind retrying
+managed.
+
+> **This is not the whole ceiling.** `bench.py` measures the two endpoints
+> separately and they turn out to be independent buckets with very different
+> limits: the stage-2 validator sustained **298 names/sec with zero 429s** on
+> the same IP where the batch endpoint was throttled at every pace. See
+> [BENCH.md](BENCH.md). Measure your own IP before assuming either number.
 
 **If stage 2 has more than ~100 candidates, use proxies.** Each proxy carries
 its own rate-limit bucket, and that is the only thing that lifts this ceiling.
