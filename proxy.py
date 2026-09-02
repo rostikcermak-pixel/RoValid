@@ -234,6 +234,16 @@ class ProxyManager:
 
             await asyncio.sleep(wait)
 
+    # How long to bench a proxy that returned 429 with no number attached.
+    # Roblox's 429 carries no Retry-After (verified against the live
+    # endpoint), so this is a guess - but a measured one: making it adaptive
+    # was tried and was 4-5x SLOWER. With a pool, 429s arrive from many
+    # proxies at once, so a pool-wide estimate grows once per proxy per
+    # episode while decaying once per episode; it ratchets to the ceiling
+    # and benches healthy proxies for far longer than the endpoint needs.
+    # A flat value beat every adaptive variant tried, so it stays flat.
+    COOLDOWN_DEFAULT = 10.0
+
     # ── Scoring API (scraped proxies) ──
 
     def score_hit(self, proxy: str | None) -> None:

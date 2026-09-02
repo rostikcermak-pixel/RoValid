@@ -231,6 +231,12 @@ class RobloxChecker:
     # shared cooldown means waiting is exactly the right move, and enforcing
     # it there threw away names that a few more seconds would have resolved
     # (they surfaced as "?" in the feed and landed in unresolved.txt).
+    #
+    # It is also a floor rather than the whole budget. Retries are bounded by
+    # _max_retries and each one may legitimately wait out a proxy cooldown,
+    # so a flat 120s silently dropped names whenever the pool was busy: a
+    # 400-worker run found 1206 names where a 10-worker run found 1294. See
+    # _total_budget.
     STATIC_TOTAL_TIMEOUT = 120.0
 
     def __init__(
@@ -296,6 +302,19 @@ class RobloxChecker:
     def _req_timeout(self) -> aiohttp.ClientTimeout:
         return self._timeout_obj
 
+    def _total_budget(self) -> float:
+        """How long one name may take before it is abandoned.
+
+        Waiting out a proxy cooldown is normal work, not a stall, so the
+        budget must cover the retries the name is actually allowed at the
+        cooldown currently in force - otherwise a busy pool looks identical
+        to a stuck one and names get thrown away.
+        """
+        return max(
+            self.STATIC_TOTAL_TIMEOUT,
+            self._max_retries * self.pm.COOLDOWN_DEFAULT,
+        )
+
     # Measured against the live endpoint: the bucket allows roughly three
     # requests, then reopens about six seconds after you STOP hammering it.
     # A flat retry shorter than that lands just before every reopen and gets
@@ -330,12 +349,12 @@ class RobloxChecker:
             self._stats.inc("ratelimited")
 
         if self._scraped and proxy:
-            self.pm.set_rate_limit(proxy, cooldown or 10.0)
+            self.pm.set_rate_limit(proxy, cooldown or self.pm.COOLDOWN_DEFAULT)
             return 0.0
         if self._rotating:
             return 0.0  # fresh IP next request, no point waiting
         if proxy:
-            await self.pm.set_cooldown(proxy, cooldown or 10.0)
+            await self.pm.set_cooldown(proxy, cooldown or self.pm.COOLDOWN_DEFAULT)
             return 0.0
 
         # Proxyless: one shared bucket. The shared cooldown owns the quiet
@@ -394,7 +413,7 @@ class RobloxChecker:
             if (
                 not self._rotating
                 and not self._proxyless
-                and time.time() - started > self.STATIC_TOTAL_TIMEOUT
+                and time.time() - started > self._total_budget()
             ):
                 return None
 
@@ -486,7 +505,7 @@ class RobloxChecker:
             if (
                 not self._rotating
                 and not self._proxyless
-                and time.time() - started > self.STATIC_TOTAL_TIMEOUT
+                and time.time() - started > self._total_budget()
             ):
                 return (ERROR, None)
 
