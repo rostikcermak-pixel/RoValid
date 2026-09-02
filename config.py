@@ -178,7 +178,10 @@ class AppSettings:
     """Application-level settings (from CLI args)."""
     debug: bool = False
     no_wizard: bool = False
-    stream: bool = False     # -s: print every check above the live panel
+    # Printing each check above the live panel is on by default; --no-stream
+    # turns it off. The default lives here so anything building AppSettings
+    # directly agrees with what argparse produces.
+    stream: bool = True
 
 
 @dataclass

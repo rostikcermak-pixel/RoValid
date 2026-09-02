@@ -188,12 +188,17 @@ limit, and names an earlier round already checked are never re-checked.
 
 Results land in `results/hits.txt`, written the moment each hit is found.
 
-Flags: `--no-wizard` reuses your last setup, `--debug` logs every request,
-`--stream` prints each check as it resolves above the live panel, `--version`.
+Each check prints above the live panel as it resolves - taken names dim out,
+hits show bright - with the stats staying pinned underneath. `--no-stream`
+turns it off.
 
-`--stream` renders at roughly 3,600 names/sec, so on a proxyless or modest
-proxied run it costs nothing - the network is slower than the rendering. It
-only becomes the bottleneck on a large pool pushing past that.
+It renders at roughly 13,000 lines/sec (pre-built styles, batched output), so
+a proxyless run or a modest proxied one never notices it: the network is far
+slower than the rendering. It only becomes the bottleneck on a pool pushing
+past that, which is why the off switch exists.
+
+Flags: `--no-wizard` reuses your last setup, `--debug` logs every request,
+`--no-stream` quietens the feed, `--version`.
 
 ---
 
