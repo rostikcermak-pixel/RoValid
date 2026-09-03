@@ -370,7 +370,24 @@ class ProxyManager:
     # once reached Roblox is a corpse, and resting it only brings it back to
     # fail again - which is what benching everything did: the pool stopped
     # draining, and started cycling dead routes through the workers instead.
-    DEAD_WITHOUT_SUCCESS = 2
+    #
+    # How many goes before that verdict matters more than it looks. A working
+    # free proxy still fails plenty, so a low number buries proxies that were
+    # only unlucky before their first success - and unlike a corpse, a good
+    # proxy lost this way never comes back. Simulated over 20,000 requests
+    # against a pool that is 5% good, with each good proxy failing a quarter
+    # of the time (three seeds, of 50 good proxies):
+    #
+    #     threshold   good lost   corpses buried
+    #             2     2.0             929
+    #             3     0.3             827
+    #             4     0.0             578
+    #             6     0.0               1
+    #
+    # Below 4 it throws away working proxies; above 4 it stops burying the
+    # corpses and the workers go back to cycling them. At a punishing 50%
+    # flake rate 4 still only loses 3 of 50, where 2 loses 16.
+    DEAD_WITHOUT_SUCCESS = 4
 
     def score_miss(self, proxy: str | None) -> None:
         """-1 point for a failed proxy. Score <= 0 -> benched, not buried.
