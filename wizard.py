@@ -9,6 +9,7 @@ import random
 import re
 import string
 import sys
+import time
 from pathlib import Path
 
 import aiohttp
@@ -25,6 +26,7 @@ from config import (
     is_valid_username,
     load_lines,
 )
+from proxy import prescreen
 from ui import (
     C,
     banner,
@@ -200,6 +202,8 @@ async def _step_proxies(config: Config) -> tuple[list[str], bool, bool]:
         elif mode == "s":
             console.print()
             scraped_proxies = await _scrape_proxies()
+            if scraped_proxies:
+                scraped_proxies = await _prescreen_proxies(scraped_proxies)
             if scraped_proxies:
                 proxies = scraped_proxies
                 scraped = True
@@ -419,6 +423,56 @@ def _step_webhook(config: Config) -> tuple[str | None, str | None]:
         config.set("webhook_always", True)
 
     return webhook_url, webhook_msg
+
+
+# Proxy pre-flight
+# ---------------------------------------------------------------------------
+
+async def _prescreen_proxies(pool: list[str]) -> list[str]:
+    """Drop the corpses before the run rather than during it.
+
+    A scraped pool is roughly 95% dead. Left alone, the run discovers that one
+    proxy at a time, each costing a full request timeout while a worker sits
+    on it: a measured 10,000-name run spent 411 batch requests to clear 26
+    chunks - 6.3% success, 15.8 attempts per chunk - and only 4 of those
+    failures were real rate limits. The rest was the pool.
+
+    Testing here costs one short timeout per proxy and they all run at once,
+    so the whole sweep is bounded by the timeout rather than by the number of
+    dead proxies.
+    """
+    console.print(f"[{C.MUTED}]Testing {len(pool):,} proxies against Roblox...[/]")
+
+    last = [0.0]
+
+    def _progress(done: int, total: int, live: int) -> None:
+        now = time.monotonic()
+        if now - last[0] < 0.5 and done < total:
+            return
+        last[0] = now
+        console.print(
+            f"  [{C.MUTED}]{done:,}/{total:,} tested · "
+            f"[{C.SUCCESS}]{live:,} alive[/][/]",
+        )
+
+    started = time.monotonic()
+    live = await prescreen(pool, on_progress=_progress)
+    elapsed = time.monotonic() - started
+
+    if not live:
+        warn_card(
+            f"None of the {len(pool):,} scraped proxies could reach Roblox.",
+            "",
+            "Free lists go stale fast. Proxyless is usually the better call -",
+            "your own IP is one clean route instead of thousands of dead ones.",
+        )
+        if not Confirm.ask("Keep the unscreened list anyway?", default=False):
+            return []
+        return pool
+
+    ok(f"{len(live):,} of {len(pool):,} proxies alive "
+       f"({len(live) / len(pool) * 100:.1f}%) in {elapsed:.0f}s")
+    return live
 
 
 # ---------------------------------------------------------------------------

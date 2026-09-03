@@ -20,6 +20,80 @@ _VALID_PROXY = re.compile(
 )
 
 
+# ---------------------------------------------------------------------------
+# Pre-flight screen
+# ---------------------------------------------------------------------------
+
+# A scraped pool is ~95% corpses. Left to the run, each one costs a full
+# request timeout to discover, one at a time, while a worker sits on it - a
+# measured run spent 411 batch requests to clear 26 chunks (6.3% success,
+# 15.8 attempts per chunk) with only 4 of those failures being real rate
+# limits. Discovering the same thing here costs one short timeout each and
+# they all happen at once, so the run itself starts against live proxies.
+PRESCREEN_CONCURRENCY = 600
+PRESCREEN_TIMEOUT = 5.0
+
+
+async def prescreen(
+    proxies: list[str],
+    concurrency: int = PRESCREEN_CONCURRENCY,
+    timeout: float = PRESCREEN_TIMEOUT,
+    on_progress=None,
+) -> list[str]:
+    """Return the subset of *proxies* that can actually reach Roblox.
+
+    Tests the real endpoint rather than a generic connectivity check: a proxy
+    that is up but cannot reach users.roblox.com is useless here, and a
+    generic check would keep it.
+    """
+    if not proxies:
+        return []
+
+    # The scrapers hand back bare "host:port". aiohttp's proxy= argument
+    # needs a scheme and raises InvalidURL without one, which would fail
+    # every proxy instantly and report a pool of zero.
+    proxies = [ProxyManager._format(p) for p in proxies if p and p.strip()]
+
+    live: list[str] = []
+    gate = asyncio.Semaphore(concurrency)
+    done = 0
+    payload = {"usernames": ["roblox"], "excludeBannedUsers": False}
+
+    async def _test(session: aiohttp.ClientSession, proxy: str) -> None:
+        nonlocal done
+        try:
+            async with gate:
+                async with session.post(
+                    BATCH_ENDPOINT, json=payload, proxy=proxy,
+                    headers={"Content-Type": "application/json"},
+                ) as resp:
+                    # 429 means the proxy reached Roblox and Roblox pushed
+                    # back - that is a working route, just a busy one, and
+                    # the run's own cooldown handling deals with it.
+                    if resp.status in (200, 429):
+                        live.append(proxy)
+        except Exception:
+            pass
+        finally:
+            done += 1
+            if on_progress and done % 250 == 0:
+                on_progress(done, len(proxies), len(live))
+
+    conn = aiohttp.TCPConnector(limit=concurrency, ttl_dns_cache=300)
+    async with aiohttp.ClientSession(
+        connector=conn,
+        timeout=aiohttp.ClientTimeout(total=timeout, sock_connect=timeout / 2),
+        trust_env=False,
+    ) as session:
+        await asyncio.gather(
+            *(_test(session, p) for p in proxies), return_exceptions=True,
+        )
+
+    if on_progress:
+        on_progress(len(proxies), len(proxies), len(live))
+    return live
+
+
 class ProxyManager:
     """Manages proxy rotation with per-proxy ratelimit cooldowns.
 
