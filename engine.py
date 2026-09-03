@@ -382,6 +382,8 @@ class RobloxChecker:
 
     async def _on_conn_error(self, proxy, attempt: int) -> None:
         """Shared connection-error policy."""
+        if self._stats:
+            self._stats.inc("conn_errors")
         if self._scraped:
             if proxy:
                 self.pm.score_miss(proxy)
@@ -420,6 +422,8 @@ class RobloxChecker:
         while True:
             proxy = await self.pm.next()
             if proxy is None and not self.pm.is_proxyless:
+                if self._stats:
+                    self._stats.inc("no_proxy")
                 return None
 
             attempt += 1
@@ -455,6 +459,11 @@ class RobloxChecker:
                     ) as resp:
                         dbg(f"  [batch {attempt}] {len(names)} names -> HTTP {resp.status}")
 
+                        if self._stats:
+                            self._stats.inc(
+                                "ok_responses" if resp.status == 200
+                                else "http_errors"
+                            )
                         if resp.status == 200:
                             data = await resp.json()
                             if self._scraped and proxy:
@@ -475,6 +484,19 @@ class RobloxChecker:
                         if resp.status == 429:
                             backoff = await self._handle_429(resp, proxy, attempt)
                         else:
+                            # Any other status through a scraped proxy is the
+                            # proxy failing, not Roblox answering: a dead free
+                            # proxy answers 502/503/403 rather than refusing
+                            # the connection. Only connection errors used to
+                            # count as a miss, so those proxies were never
+                            # scored down, never benched and never buried -
+                            # they stayed permanently available at weight 1
+                            # while working proxies cycled on and off the
+                            # bench. The pool therefore skewed further toward
+                            # them the longer a run went on, which is the
+                            # decay to zero that outlived three other fixes.
+                            if self._scraped and proxy:
+                                self.pm.score_miss(proxy)
                             backoff = 0.5
 
             except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
@@ -512,6 +534,8 @@ class RobloxChecker:
         while True:
             proxy = await self.pm.next()
             if proxy is None and not self.pm.is_proxyless:
+                if self._stats:
+                    self._stats.inc("no_proxy")
                 return (EXHAUSTED, None)
 
             attempt += 1
@@ -543,6 +567,11 @@ class RobloxChecker:
                     ) as resp:
                         dbg(f"  [{attempt}] {username} -> HTTP {resp.status}")
 
+                        if self._stats:
+                            self._stats.inc(
+                                "ok_responses" if resp.status == 200
+                                else "http_errors"
+                            )
                         if resp.status == 200:
                             data = await resp.json()
                             code = data.get("code")
@@ -564,6 +593,19 @@ class RobloxChecker:
                         if resp.status == 429:
                             backoff = await self._handle_429(resp, proxy, attempt)
                         else:
+                            # Any other status through a scraped proxy is the
+                            # proxy failing, not Roblox answering: a dead free
+                            # proxy answers 502/503/403 rather than refusing
+                            # the connection. Only connection errors used to
+                            # count as a miss, so those proxies were never
+                            # scored down, never benched and never buried -
+                            # they stayed permanently available at weight 1
+                            # while working proxies cycled on and off the
+                            # bench. The pool therefore skewed further toward
+                            # them the longer a run went on, which is the
+                            # decay to zero that outlived three other fixes.
+                            if self._scraped and proxy:
+                                self.pm.score_miss(proxy)
                             backoff = 0.5
 
             except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:

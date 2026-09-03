@@ -111,11 +111,13 @@ def parse_args() -> AppSettings:
     parser.add_argument("-s", "--stream", dest="stream", action="store_true",
                         help=argparse.SUPPRESS)  # on by default; kept working
     parser.set_defaults(stream=AppSettings.stream)
+    parser.add_argument("--diag", action="store_true",
+                        help="Sample the run into logs/diag.csv every 5s")
     parser.add_argument("--version", action="version",
                         version=f"RoValid v{_config.VERSION}")
     args = parser.parse_args()
     return AppSettings(debug=args.debug, no_wizard=args.no_wizard,
-                       stream=args.stream)
+                       stream=args.stream, diag=args.diag)
 
 
 # ---------------------------------------------------------------------------
@@ -210,6 +212,48 @@ async def _rps_calculator(stats: Stats, stop_event: asyncio.Event) -> None:
         prev_req = stats.requests
         await asyncio.sleep(1)
         stats.set_rps(float(stats.requests - prev_req))
+
+
+DIAG_INTERVAL = 5.0
+_DIAG_FIELDS = (
+    "screened", "ok", "http_err", "conn_err", "ratelimited", "no_proxy",
+    "proxies_usable", "proxies_resting", "proxies_buried",
+)
+
+
+async def _diag_sampler(stats: Stats, pm, stop_event: asyncio.Event,
+                        path) -> None:
+    """Write a per-interval breakdown of the run to *path*.
+
+    Deltas, not totals: a run that decays needs the shape over time, and
+    cumulative counters hide it. Each row says what happened during that
+    interval and what the proxy pool looked like at the end of it, so the
+    column that grows as throughput falls is the cause.
+    """
+    prev = {f: 0 for f in ("screened", "ok_responses", "http_errors",
+                           "conn_errors", "ratelimited", "no_proxy")}
+    started = time.time()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as fh:
+        fh.write("elapsed," + ",".join(_DIAG_FIELDS) + "\n")
+        fh.flush()
+        while not stop_event.is_set():
+            try:
+                await asyncio.wait_for(stop_event.wait(), DIAG_INTERVAL)
+            except asyncio.TimeoutError:
+                pass
+            now = {f: getattr(stats, f) for f in prev}
+            delta = {f: now[f] - prev[f] for f in prev}
+            prev = now
+            usable, resting, buried = pm.pool_state()
+            fh.write(
+                f"{time.time() - started:.0f},"
+                f"{delta['screened']},{delta['ok_responses']},"
+                f"{delta['http_errors']},{delta['conn_errors']},"
+                f"{delta['ratelimited']},{delta['no_proxy']},"
+                f"{usable},{resting},{buried}\n"
+            )
+            fh.flush()
 
 
 # ---------------------------------------------------------------------------
@@ -373,6 +417,12 @@ async def _run_checker(
 
     stop_rps = asyncio.Event()
     rps_task = asyncio.create_task(_rps_calculator(stats, stop_rps))
+    diag_task = (
+        asyncio.create_task(
+            _diag_sampler(stats, pm, stop_rps, LOGS_DIR / "diag.csv")
+        )
+        if settings.diag else None
+    )
     webhook_task = asyncio.create_task(webhook.run()) if webhook else None
 
     async def _record_hit(name: str) -> None:
@@ -676,6 +726,13 @@ async def _run_checker(
     finally:
         stop_rps.set()
         rps_task.cancel()
+        if diag_task:
+            # Let it write one final row before it goes, so the tail of a
+            # decaying run - the part worth seeing - is not the part missing.
+            try:
+                await asyncio.wait_for(diag_task, timeout=2.0)
+            except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+                diag_task.cancel()
         if webhook:
             try:
                 await webhook.flush()

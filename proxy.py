@@ -173,6 +173,34 @@ class ProxyManager:
             )
         return max(0, len(self._proxies) - len(self._dead))
 
+    def pool_state(self) -> tuple[int, int, int]:
+        """(usable, resting, buried) right now.
+
+        Resting covers both a bench and a rate-limit cooldown - either way the
+        proxy exists but cannot be handed out. Splitting these out is what
+        makes a decaying run readable: a pool going to zero usable with a
+        large resting count is a cooldown problem, and one going to zero with
+        a large buried count is an attrition problem. They need opposite
+        fixes.
+        """
+        if not self._scored:
+            alive = self.alive_count
+            return alive, 0, len(self._dead)
+        now = time.time()
+        usable = resting = 0
+        for k in self._scores:
+            if k in self._dead:
+                continue
+            held = max(
+                self._rate_limited_until.get(k, 0.0),
+                self._cooldowns.get(k, 0.0),
+            )
+            if held > now:
+                resting += 1
+            else:
+                usable += 1
+        return usable, resting, len(self._dead)
+
     @property
     def total_count(self) -> int:
         return len(self._proxies)
