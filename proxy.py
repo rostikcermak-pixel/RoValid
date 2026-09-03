@@ -128,6 +128,10 @@ class ProxyManager:
         self._scores: dict[str, int] = {}
         self._rate_limited_until: dict[str, float] = {}
         self._bench_count: dict[str, int] = {}
+        # Proxies that have reached Roblox at least once this run. A proxy
+        # that has works is worth resting; one that has never worked is a
+        # corpse and resting it just brings it back to fail again.
+        self._ever_worked: set[str] = set()
         if scored:
             for raw, key in zip(self._proxies, self._formatted):
                 if raw and raw.strip():
@@ -338,6 +342,7 @@ class ProxyManager:
             # the bench history rather than escalating it forever on a proxy
             # that is merely busy sometimes.
             self._bench_count.pop(proxy, None)
+            self._ever_worked.add(proxy)
 
     def set_rate_limit(self, proxy: str | None, seconds: float) -> None:
         """Mark proxy as rate-limited until *now + seconds*.
@@ -351,6 +356,8 @@ class ProxyManager:
             until = time.time() + seconds
             self._rate_limited_until[proxy] = until
             self._scores[proxy] = min(self._scores[proxy] + 1, 100)
+            # A 429 is proof the route reaches Roblox, same as a hit.
+            self._ever_worked.add(proxy)
             if until < self._next_expiry:
                 self._next_expiry = until
 
@@ -358,6 +365,12 @@ class ProxyManager:
     # it happens. Free proxies are flaky rather than dead - a timeout usually
     # means busy - so a bad moment costs a rest, not a burial.
     BENCH_BACKOFF = (30.0, 60.0, 120.0, 300.0)
+
+    # ...but only for proxies that have actually worked. One that has never
+    # once reached Roblox is a corpse, and resting it only brings it back to
+    # fail again - which is what benching everything did: the pool stopped
+    # draining, and started cycling dead routes through the workers instead.
+    DEAD_WITHOUT_SUCCESS = 2
 
     def score_miss(self, proxy: str | None) -> None:
         """-1 point for a failed proxy. Score <= 0 -> benched, not buried.
@@ -382,6 +395,20 @@ class ProxyManager:
             return
 
         benched = self._bench_count.get(proxy, 0)
+
+        if (
+            proxy not in self._ever_worked
+            and benched + 1 >= self.DEAD_WITHOUT_SUCCESS
+        ):
+            # Never worked, and has now had several goes. Bury it for real so
+            # workers stop being handed a route that has only ever failed.
+            self._dead.add(proxy)
+            del self._scores[proxy]
+            self._bench_count.pop(proxy, None)
+            self._rate_limited_until.pop(proxy, None)
+            self._ready_at = 0.0
+            return
+
         wait = self.BENCH_BACKOFF[min(benched, len(self.BENCH_BACKOFF) - 1)]
         self._bench_count[proxy] = benched + 1
         self._scores[proxy] = 1
