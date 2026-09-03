@@ -261,7 +261,22 @@ async def _diag_sampler(stats: Stats, pm, stop_event: asyncio.Event,
 # ---------------------------------------------------------------------------
 
 # Stage-1 attempts on one chunk before giving up and paying stage-2 prices.
-MAX_CHUNK_TRIES = 5
+#
+# The trade is lopsided and this number was set as if it were not. Giving up
+# on a 200-name chunk costs 200 requests, one per name; trying again costs
+# one. So retrying stays cheaper than surrendering for something like 200
+# tries, and the old value of 5 gave up roughly forty times too early.
+#
+# Measured on a 100,000-name run over a screened 128-proxy pool: 288 of 500
+# chunks - 58% of the entire job - ran out of tries and fell through, so
+# 57,600 names were checked one at a time. That single decision accounted
+# for 61,677 of the run's 67,193 requests and dropped efficiency to 1.5
+# names per request against a ceiling of 200.
+#
+# 40 is well inside the point where retrying is still the cheaper option
+# (at most 40 requests against 200) while keeping a genuinely unscreenable
+# chunk from spinning forever.
+MAX_CHUNK_TRIES = 40
 
 
 async def _run_checker(
