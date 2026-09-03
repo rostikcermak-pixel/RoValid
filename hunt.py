@@ -26,6 +26,7 @@ import aiohttp
 from config import BATCH_MAX, Stats, is_valid_username
 from engine import AVAILABLE, MALFORMED_CHUNK, RobloxChecker, SharedCooldown
 from proxy import ProxyManager
+from rarity import rate
 
 OUT = Path("docs/hits.json")
 
@@ -33,6 +34,20 @@ OUT = Path("docs/hits.json")
 # few dozen. Keeping the file small also keeps every scheduled run's commit
 # small, which matters when it commits every few minutes forever.
 KEEP_PER_LENGTH = 60
+
+# Ordering on the page. Free names are not scarce - a one-minute sample found
+# 158 free five-character names, none of them digit-free - so listing by
+# recency alone buries the one name anyone wants under a wall of licence
+# plates. Rarity first, then newest, keeps the good ones visible.
+def _order(entry: dict) -> tuple:
+    # Rarest first; within a tier, newest first. `found` is an ISO timestamp,
+    # so reversing the string sorts the dates without parsing them.
+    return (-entry.get("weight", 0), _desc(entry.get("found", "")))
+
+
+def _desc(iso: str) -> tuple:
+    """Sort key that orders ISO timestamps newest-first."""
+    return tuple(-ord(c) for c in iso)
 
 GEN_CHARS = string.ascii_lowercase + string.digits
 
@@ -72,10 +87,11 @@ async def hunt_length(
     length: int,
     budget: float,
     seen: set[str],
-) -> tuple[list[str], int]:
-    """Return (free names found, names checked) within *budget* seconds."""
+) -> tuple[list[str], int, int]:
+    """Return (free names, names screened, stage-2 survivors) in *budget*s."""
     found: list[str] = []
     checked = 0
+    survivors_seen = 0
     started = time.monotonic()
 
     while time.monotonic() - started < budget:
@@ -90,20 +106,21 @@ async def hunt_length(
         checked += len(names)
 
         survivors = [n for n in names if n.lower() not in taken]
+        survivors_seen += len(survivors)
         for name in survivors:
             if time.monotonic() - started >= budget:
                 break
             outcome, _code = await checker.validate(session, name)
             if outcome == AVAILABLE:
                 found.append(name)
-    return found, checked
+    return found, checked, survivors_seen
 
 
 async def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--minutes", type=float, default=8.0,
                     help="total wall-clock budget (default 8)")
-    ap.add_argument("--lengths", default="3,4,5,6")
+    ap.add_argument("--lengths", default="3,4,5")
     ap.add_argument("--workers", type=int, default=8)
     args = ap.parse_args()
 
@@ -125,7 +142,14 @@ async def main() -> int:
         max_inflight=args.workers, cooldown=SharedCooldown(),
     )
 
-    budget = args.minutes * 60 / max(len(lengths), 1)
+    # An even split wastes most of a run. Every 3- and 4-character name is
+    # already taken - an exhaustive sweep of the 1,679,616 four-character
+    # names turned up nothing - so those columns are a standing check that
+    # the answer has not changed, not a search. Length 5 is where finds
+    # actually come from and gets the bulk of the time.
+    weights = {3: 1.0, 4: 1.0}
+    total_w = sum(weights.get(n, 4.0) for n in lengths)
+    seconds = args.minutes * 60
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     fresh_total = 0
 
@@ -134,20 +158,28 @@ async def main() -> int:
         timeout=aiohttp.ClientTimeout(total=20, sock_connect=8),
     ) as session:
         for length in lengths:
-            found, checked = await hunt_length(
+            budget = seconds * weights.get(length, 4.0) / total_w
+            found, checked, survivors = await hunt_length(
                 checker, session, length, budget, seen,
             )
             key = str(length)
             entries = data["lengths"].get(key, [])
             for name in found:
-                entries.insert(0, {"name": name, "found": now})
+                tier, weight = rate(name)
+                entries.append({
+                    "name": name, "found": now,
+                    "tier": tier, "weight": weight,
+                })
+            entries.sort(key=_order)
             data["lengths"][key] = entries[:KEEP_PER_LENGTH]
             totals = data["totals"].setdefault(key, {"checked": 0, "found": 0})
             totals["checked"] += checked
             totals["found"] += len(found)
             fresh_total += len(found)
-            print(f"  len {length}: checked {checked:,}, free {len(found)}",
-                  flush=True)
+            print(
+                f"  len {length}: {budget:.0f}s, screened {checked:,}, "
+                f"survivors {survivors:,}, free {len(found)}", flush=True,
+            )
 
     data["updated"] = now
     OUT.parent.mkdir(parents=True, exist_ok=True)

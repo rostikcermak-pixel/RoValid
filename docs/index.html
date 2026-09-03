@@ -1,0 +1,279 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RoValid Live</title>
+<meta name="description" content="Roblox usernames the hunter found free, ranked by how good they are. Updated every 15 minutes.">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;700;900&family=IBM+Plex+Mono:wght@400;600&display=swap">
+<style>
+/* A live board, committed to one dark world on purpose - it is a departures
+   display, not a document, and it should look the same to everyone watching
+   it. Every colour is painted explicitly so the page never borrows a host
+   theme's ground. */
+:root{
+  --ground:#0B0E14; --panel:#131824; --panel-2:#171D2B;
+  --line:#232A3A; --line-soft:#1B2130;
+  --ink:#E4E8F1; --ink-dim:#9BA6BE; --muted:#6E7994;
+  --accent:#4C9AFF; --gold:#F0B429; --green:#35D07F; --dead:#4A5468;
+  --shadow:0 1px 0 rgba(255,255,255,.03), 0 8px 24px rgba(0,0,0,.45);
+  color-scheme:dark;
+}
+*{box-sizing:border-box}
+html,body{margin:0}
+body{
+  background:var(--ground); color:var(--ink);
+  font-family:Archivo,"Helvetica Neue",Arial,sans-serif;
+  font-size:15px; line-height:1.5;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1180px;margin:0 auto;padding:28px 20px 72px}
+
+/* ── masthead ─────────────────────────────────────────────── */
+header{display:flex;flex-wrap:wrap;align-items:baseline;gap:14px 22px;
+  padding-bottom:18px;border-bottom:1px solid var(--line)}
+h1{font-size:26px;font-weight:900;letter-spacing:-.02em;margin:0}
+h1 span{color:var(--accent)}
+.tag{color:var(--muted);font-size:13.5px;max-width:52ch}
+.status{margin-left:auto;display:flex;align-items:center;gap:9px;
+  font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:12.5px;
+  color:var(--ink-dim);white-space:nowrap}
+.dot{width:8px;height:8px;border-radius:50%;background:var(--green);
+  box-shadow:0 0 0 3px rgba(53,208,127,.16);animation:pulse 2.4s ease-in-out infinite}
+@keyframes pulse{50%{opacity:.35}}
+@media (prefers-reduced-motion:reduce){.dot{animation:none}}
+
+/* ── the three boards ─────────────────────────────────────── */
+/* align-items:start so a column that found nothing sits at its own height
+   instead of being stretched to match the tall one beside it. */
+.boards{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;
+  margin-top:22px;align-items:start}
+@media (max-width:860px){.boards{grid-template-columns:1fr}}
+.board{background:var(--panel);border:1px solid var(--line);border-radius:10px;
+  box-shadow:var(--shadow);display:flex;flex-direction:column;overflow:hidden}
+.board-head{display:flex;align-items:baseline;gap:10px;padding:14px 16px;
+  border-bottom:1px solid var(--line-soft);background:var(--panel-2)}
+.board-head b{font-size:17px;font-weight:700;letter-spacing:-.01em}
+.board-head .n{margin-left:auto;font-family:"IBM Plex Mono",monospace;
+  font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
+.rows{list-style:none;margin:0;padding:6px;display:flex;flex-direction:column;
+  gap:2px;max-height:460px;overflow-y:auto}
+.row{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:6px;
+  border:0;width:100%;text-align:left;background:transparent;color:inherit;
+  font:inherit;cursor:pointer}
+.row:hover,.row:focus-visible{background:var(--panel-2);outline:none}
+.row:focus-visible{box-shadow:inset 0 0 0 1px var(--accent)}
+.nm{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:16px;
+  font-weight:600;letter-spacing:.04em}
+.chip{font-size:10.5px;font-weight:700;text-transform:uppercase;
+  letter-spacing:.09em;padding:2px 7px;border-radius:3px;
+  background:rgba(110,121,148,.16);color:var(--muted)}
+/* Rarity is the whole point of the board, so it is the only place colour is
+   spent. Everything else stays quiet. */
+.t-legendary .chip{background:rgba(240,180,41,.16);color:var(--gold)}
+.t-legendary .nm{color:var(--gold)}
+.t-epic .chip{background:rgba(53,208,127,.15);color:var(--green)}
+.t-epic .nm{color:var(--green)}
+.t-rare .chip{background:rgba(76,154,255,.16);color:var(--accent)}
+.t-junk .nm,.t-junk .chip{color:var(--dead)}
+.ago{margin-left:auto;font-family:"IBM Plex Mono",monospace;font-size:11.5px;
+  color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
+.copied{color:var(--green)}
+
+/* A column that has never produced anything is the most interesting thing on
+   the page, so it gets a real state rather than blank space. */
+.empty{padding:30px 18px;text-align:center;color:var(--muted)}
+.empty .big{font-family:"IBM Plex Mono",monospace;font-size:30px;
+  font-weight:600;color:var(--dead);display:block;margin-bottom:8px}
+.empty p{margin:0;font-size:13px;line-height:1.55}
+
+/* ── chat ─────────────────────────────────────────────────── */
+.talk{margin-top:34px;background:var(--panel);border:1px solid var(--line);
+  border-radius:10px;padding:20px;box-shadow:var(--shadow)}
+.talk h2{margin:0 0 6px;font-size:18px;font-weight:700}
+.talk p{margin:0 0 14px;color:var(--muted);font-size:13.5px;max-width:62ch}
+.setup{font-family:"IBM Plex Mono",monospace;font-size:12.5px;color:var(--ink-dim);
+  background:var(--ground);border:1px solid var(--line-soft);border-radius:7px;
+  padding:14px 16px;overflow-x:auto;line-height:1.7}
+.setup b{color:var(--accent);font-weight:600}
+footer{margin-top:26px;color:var(--muted);font-size:12.5px;
+  display:flex;flex-wrap:wrap;gap:8px 18px}
+a{color:var(--accent)}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>RoValid <span>Live</span></h1>
+  <p class="tag">Roblox usernames found free, ranked by how good they are. The
+     hunter runs on GitHub every 15 minutes. Click a name to copy it.</p>
+  <div class="status"><span class="dot" id="dot"></span><span id="stamp">loading…</span></div>
+</header>
+
+<main class="boards" id="boards">
+  <!-- rendered from hits.json -->
+</main>
+
+<section class="talk">
+  <h2>Talk</h2>
+  <p>Claim your finds, argue about whose username is better, post the one you
+     got in 2016 and will never let anyone forget.</p>
+  <div id="chat"></div>
+</section>
+
+<footer>
+  <span id="totals"></span>
+  <span><a href="https://github.com/rostikcermak-pixel/RoValid">Source on GitHub</a></span>
+  <span>A free name here may be gone by the time you read it — that is the game.</span>
+</footer>
+
+</div>
+
+<script>
+// ── chat ──────────────────────────────────────────────────────
+// Fill these in after enabling Discussions on the repo and installing the
+// giscus app, then this block becomes the comment thread. Until then the
+// page says what is missing rather than rendering an empty box.
+const GISCUS = { repo: "rostikcermak-pixel/RoValid", repoId: "", categoryId: "" };
+
+function mountChat() {
+  const host = document.getElementById("chat");
+  if (!GISCUS.repoId || !GISCUS.categoryId) {
+    host.innerHTML =
+      '<div class="setup">Chat is not switched on yet. Two steps:<br><br>' +
+      '1 &nbsp;Repo <b>Settings &rarr; General &rarr; Features</b>, tick <b>Discussions</b><br>' +
+      '2 &nbsp;Visit <b>giscus.app</b>, enter this repo, copy the ' +
+      '<b>repoId</b> and <b>categoryId</b> it gives you into ' +
+      '<b>docs/index.html</b><br><br>' +
+      'Posting needs a GitHub account, which is the point — it keeps the ' +
+      'board from turning into a spam wall.</div>';
+    return;
+  }
+  const s = document.createElement("script");
+  s.src = "https://giscus.app/client.js";
+  s.crossOrigin = "anonymous";
+  s.async = true;
+  Object.assign(s.dataset, {
+    repo: GISCUS.repo, repoId: GISCUS.repoId, categoryId: GISCUS.categoryId,
+    mapping: "pathname", reactionsEnabled: "1", emitMetadata: "0",
+    inputPosition: "top", theme: "dark_dimmed", lang: "en",
+  });
+  host.appendChild(s);
+}
+
+// ── board ─────────────────────────────────────────────────────
+const LENGTHS = ["3", "4", "5"];
+// The whole space per length, so an empty column can say how much of it has
+// been ruled out instead of just showing nothing.
+const SPACE = { "3": 46656, "4": 1679616, "5": 60466176 };
+
+function ago(iso) {
+  const s = Math.max(0, (Date.now() - new Date(iso)) / 1000);
+  if (s < 90) return Math.round(s) + "s";
+  if (s < 5400) return Math.round(s / 60) + "m";
+  if (s < 172800) return Math.round(s / 3600) + "h";
+  return Math.round(s / 86400) + "d";
+}
+
+function rowEl(entry) {
+  const li = document.createElement("li");
+  const b = document.createElement("button");
+  b.className = "row t-" + (entry.tier || "plain");
+  b.type = "button";
+  b.innerHTML =
+    '<span class="nm"></span><span class="chip"></span><span class="ago"></span>';
+  b.querySelector(".nm").textContent = entry.name;
+  b.querySelector(".chip").textContent = entry.tier || "plain";
+  b.querySelector(".ago").textContent = ago(entry.found);
+  b.addEventListener("click", async () => {
+    const chip = b.querySelector(".chip");
+    const was = chip.textContent;
+    try {
+      await navigator.clipboard.writeText(entry.name);
+      chip.textContent = "copied";
+    } catch {
+      chip.textContent = "copy failed";
+    }
+    chip.classList.add("copied");
+    setTimeout(() => {
+      chip.textContent = was;
+      chip.classList.remove("copied");
+    }, 1400);
+  });
+  li.appendChild(b);
+  return li;
+}
+
+function emptyEl(len, checked) {
+  const d = document.createElement("div");
+  d.className = "empty";
+  const pct = checked ? (checked / SPACE[len]) * 100 : 0;
+  d.innerHTML =
+    '<span class="big">0</span><p>Nothing here has ever been free.<br>' +
+    checked.toLocaleString() + " screened" +
+    (pct >= 0.1 ? " — " + pct.toFixed(1) + "% of every " + len +
+      "-character name" : "") + ".</p>";
+  return d;
+}
+
+function render(data) {
+  const boards = document.getElementById("boards");
+  boards.textContent = "";
+  let grand = 0;
+
+  for (const len of LENGTHS) {
+    const entries = (data.lengths && data.lengths[len]) || [];
+    const totals = (data.totals && data.totals[len]) || { checked: 0, found: 0 };
+    grand += totals.checked || 0;
+
+    const board = document.createElement("section");
+    board.className = "board";
+    const head = document.createElement("div");
+    head.className = "board-head";
+    head.innerHTML = "<b></b><span class='n'></span>";
+    head.querySelector("b").textContent = len + " characters";
+    head.querySelector(".n").textContent =
+      (totals.found || 0).toLocaleString() + " found";
+    board.appendChild(head);
+
+    if (entries.length) {
+      const ul = document.createElement("ul");
+      ul.className = "rows";
+      entries.forEach((e) => ul.appendChild(rowEl(e)));
+      board.appendChild(ul);
+    } else {
+      board.appendChild(emptyEl(len, totals.checked || 0));
+    }
+    boards.appendChild(board);
+  }
+
+  document.getElementById("stamp").textContent =
+    data.updated ? "updated " + ago(data.updated) + " ago" : "no data yet";
+  document.getElementById("totals").textContent =
+    grand.toLocaleString() + " names screened so far";
+}
+
+async function load() {
+  try {
+    // Pages caches aggressively and this file changes every few minutes.
+    const r = await fetch("hits.json?t=" + Date.now(), { cache: "no-store" });
+    if (!r.ok) throw new Error(r.status);
+    render(await r.json());
+  } catch (err) {
+    document.getElementById("stamp").textContent = "feed unavailable";
+    document.getElementById("dot").style.background = "var(--dead)";
+    if (!document.getElementById("boards").children.length) {
+      render({ lengths: {}, totals: {} });
+    }
+  }
+}
+
+load();
+setInterval(load, 30000);
+mountChat();
+</script>
+</body>
+</html>
