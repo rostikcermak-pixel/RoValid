@@ -1,0 +1,71 @@
+name: hunt
+
+# Every 15 minutes. GitHub's minimum is 5, but scheduled runs are delayed or
+# dropped under load, so a tighter schedule buys queueing rather than speed.
+# Note GitHub disables scheduled workflows on a public repo after 60 days
+# with no activity - this one commits on most runs, which keeps it alive.
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: "Wall-clock budget for the hunt"
+        default: "8"
+      bench:
+        description: "Measure this runner's rate limits instead of hunting"
+        type: boolean
+        default: false
+
+# Never let two runs commit the same file at once.
+concurrency:
+  group: hunt
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  hunt:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      # Roblox sits behind Cloudflare and GitHub runners are datacenter IPs,
+      # which can be throttled harder than a home connection. This says what
+      # this runner actually gets, rather than assuming.
+      - name: Bench the runner
+        if: inputs.bench
+        run: python bench.py --headers --batch --duration 10
+
+      - name: Hunt
+        if: ${{ !inputs.bench }}
+        run: python hunt.py --minutes ${{ inputs.minutes || 8 }} --lengths 3,4,5
+
+      - name: Publish findings
+        if: ${{ !inputs.bench }}
+        run: |
+          git config user.name  "rovalid-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add docs/hits.json
+          # Most runs find nothing new, and an empty commit every 15 minutes
+          # would bury the history for no gain.
+          if git diff --cached --quiet; then
+            echo "nothing new"
+            exit 0
+          fi
+          git commit -m "hunt: $(date -u '+%Y-%m-%d %H:%M UTC')"
+          # Another run may have landed while this one was checking.
+          for i in 1 2 3; do
+            git pull --rebase --autostash origin "${GITHUB_REF_NAME}" && break
+            sleep $((i * 5))
+          done
+          git push origin "HEAD:${GITHUB_REF_NAME}"
