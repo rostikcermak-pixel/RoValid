@@ -148,11 +148,26 @@ async def setup_wizard(config: Config, settings: AppSettings) -> RunConfig:
 # Step 1: Proxies
 # ---------------------------------------------------------------------------
 
+# Nobody keeps thousands of paid proxies in a text file. When the config
+# does not say what kind of pool was saved - it did not record it before -
+# infer it from the size, so an existing free pool is treated as free on the
+# very next run rather than only after a fresh scrape.
+FREE_POOL_HINT = 50
+
+
+def _pool_is_free(config: Config, pool: list[str]) -> bool:
+    known = config.get("proxies_are_free")
+    if known is not None:
+        return bool(known)
+    return len(pool) > FREE_POOL_HINT
+
+
 async def _step_proxies(config: Config) -> tuple[list[str], bool, bool]:
     """Returns (proxies, remove_bad, scraped)."""
     proxies: list[str] = []
     remove_bad = False
     scraped = False
+    screened_here = False
 
     existing = load_lines(DEFAULT_PROXY_FILE)
     reuse_cfg = config.get("reuse_proxies")
@@ -162,6 +177,7 @@ async def _step_proxies(config: Config) -> tuple[list[str], bool, bool]:
         info_card(f"Found {len(existing)} proxies from last session.")
         if Confirm.ask("Reuse them?", default=False):
             proxies = existing
+            scraped = _pool_is_free(config, proxies)
             ok(f"Reusing {len(proxies)} proxies")
             if Confirm.ask("Always reuse without asking?", default=False):
                 config.set("reuse_proxies", True)
@@ -170,6 +186,12 @@ async def _step_proxies(config: Config) -> tuple[list[str], bool, bool]:
                 config.set("reuse_proxies", False)
     elif existing and reuse_cfg:
         proxies = existing
+        # A reused pool is the same kind of pool it was when it was saved.
+        # Forgetting that turned every scoring and screening protection off:
+        # `scraped` gates all of it, so an auto-reused free pool ran with no
+        # scoring, no benching, no burial and no pre-flight screen - which is
+        # every proxy fix in this file doing nothing at all.
+        scraped = _pool_is_free(config, proxies)
         ok(f"Auto-reusing {len(proxies)} proxies")
 
     if not proxies:
@@ -204,11 +226,19 @@ async def _step_proxies(config: Config) -> tuple[list[str], bool, bool]:
             scraped_proxies = await _scrape_proxies()
             if scraped_proxies:
                 scraped_proxies = await _prescreen_proxies(scraped_proxies)
+                screened_here = True
             if scraped_proxies:
                 proxies = scraped_proxies
                 scraped = True
+                config.set("proxies_are_free", True)
                 ensure_file(DEFAULT_PROXY_FILE)
                 Path(DEFAULT_PROXY_FILE).write_text("\n".join(proxies), encoding="utf-8")
+
+    # Screen here rather than only on the scrape branch. Proxies go stale
+    # between sessions, so a reused list is exactly the one most in need of
+    # it - and that was the path where it never ran.
+    if len(proxies) > 1 and not screened_here:
+        proxies = await _prescreen_proxies(proxies)
 
     if proxies:
         tag = f" [{C.MUTED}](free)[/]" if scraped else ""
