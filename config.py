@@ -182,6 +182,10 @@ class AppSettings:
     # turns it off. The default lives here so anything building AppSettings
     # directly agrees with what argparse produces.
     stream: bool = True
+    # Sample the run into logs/diag.csv every few seconds. Off by default; it
+    # exists so a run that decays can be diagnosed from data rather than from
+    # a plausible story about what might be wrong.
+    diag: bool = False
 
 
 @dataclass
@@ -229,6 +233,14 @@ class Stats:
     ratelimited: int = 0
     fellback_chunks: int = 0     # stage-1 chunks that had to go to stage 2
     circuit_opens: int = 0
+    # Why requests are failing. Four rounds of fixes for a run that decays to
+    # zero were each aimed at a plausible cause, and each left it decaying, so
+    # these exist to stop the guessing: --diag samples them over time and the
+    # one that grows is the answer.
+    ok_responses: int = 0        # HTTP 200
+    http_errors: int = 0         # any other status - usually a dying proxy
+    conn_errors: int = 0         # timeout, reset, refused
+    no_proxy: int = 0            # a worker asked for a proxy and got none
     rps: float = 0.0
     checks_rps: float = 0.0
     peak_rps: float = 0.0
