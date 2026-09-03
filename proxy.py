@@ -127,6 +127,7 @@ class ProxyManager:
         self._scored = scored
         self._scores: dict[str, int] = {}
         self._rate_limited_until: dict[str, float] = {}
+        self._bench_count: dict[str, int] = {}
         if scored:
             for raw, key in zip(self._proxies, self._formatted):
                 if raw and raw.strip():
@@ -158,7 +159,14 @@ class ProxyManager:
         if self.is_single:
             return 1
         if self._scored:
-            return len(self._scores)
+            # Benched proxies are still in _scores but cannot be handed out,
+            # so counting them would report a pool that is not really there.
+            now = time.time()
+            return sum(
+                1 for k in self._scores
+                if self._rate_limited_until.get(k, 0.0) <= now
+                and k not in self._dead
+            )
         return max(0, len(self._proxies) - len(self._dead))
 
     @property
@@ -326,6 +334,10 @@ class ProxyManager:
             return
         if proxy in self._scores:
             self._scores[proxy] = min(self._scores[proxy] + 5, 100)
+            # It came back and worked, so it is not a repeat offender - clear
+            # the bench history rather than escalating it forever on a proxy
+            # that is merely busy sometimes.
+            self._bench_count.pop(proxy, None)
 
     def set_rate_limit(self, proxy: str | None, seconds: float) -> None:
         """Mark proxy as rate-limited until *now + seconds*.
@@ -342,18 +354,43 @@ class ProxyManager:
             if until < self._next_expiry:
                 self._next_expiry = until
 
+    # How long a proxy sits out after its score runs down, growing each time
+    # it happens. Free proxies are flaky rather than dead - a timeout usually
+    # means busy - so a bad moment costs a rest, not a burial.
+    BENCH_BACKOFF = (30.0, 60.0, 120.0, 300.0)
+
     def score_miss(self, proxy: str | None) -> None:
-        """-1 point for a failed proxy. Score <= 0 -> removed."""
+        """-1 point for a failed proxy. Score <= 0 -> benched, not buried.
+
+        This used to delete the proxy permanently. Every proxy starts on 1
+        point, so that was one bad moment each, and nothing ever came back:
+        `_dead` only grew. Over a long run the pool drained monotonically and
+        throughput went with it - a measured 100,000-name run opened at 627
+        names/sec and finished at 0, having run itself out of proxies rather
+        than out of names.
+
+        Benching reuses the cooldown machinery `next` already waits on, so a
+        rested proxy returns on its own and the pool stops shrinking.
+        """
         if not self._scored or not proxy:
             return
-        if proxy in self._scores:
-            self._scores[proxy] -= 1
-            if self._scores[proxy] <= 0:
-                self._dead.add(proxy)
-                del self._scores[proxy]
-                # Permanent removal - force a rebuild rather than letting the
-                # cached table keep offering a proxy that no longer exists.
-                self._ready_at = 0.0
+        if proxy not in self._scores:
+            return
+
+        self._scores[proxy] -= 1
+        if self._scores[proxy] > 0:
+            return
+
+        benched = self._bench_count.get(proxy, 0)
+        wait = self.BENCH_BACKOFF[min(benched, len(self.BENCH_BACKOFF) - 1)]
+        self._bench_count[proxy] = benched + 1
+        self._scores[proxy] = 1
+        until = time.time() + wait
+        self._rate_limited_until[proxy] = until
+        if until < self._next_expiry:
+            self._next_expiry = until
+        # The cached pick table still lists it, so force a rebuild.
+        self._ready_at = 0.0
 
     async def mark_dead(self, proxy: str | None) -> None:
         if not self.remove_on_fail or proxy is None:
