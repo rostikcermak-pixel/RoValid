@@ -10,3 +10,7 @@ logs/
 
 # Local hunt output; the live board file is written by the schedule only.
 hits.local.json
+
+# hunt.py writes the board to a temp file and renames it over the real one,
+# so a reader never sees half a JSON document. A killed run can leave one behind.
+*.json.tmp

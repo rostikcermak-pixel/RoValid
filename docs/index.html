@@ -220,6 +220,7 @@ const GISCUS = {
 const LENGTHS = ["3", "4", "5"];
 const SPACE = { "3": 46656, "4": 1679616, "5": 60466176 };
 const TIER_ORDER = ["legendary", "epic", "rare", "solid", "plain", "junk"];
+const LIVE_WINDOW = 240;   // seconds since the last write to still call it live
 
 // Ported from the desktop tool's panel. A terminal cannot make text bigger,
 // so the number people watch is drawn rather than typed.
@@ -384,14 +385,39 @@ function renderHero(data) {
     screened.toLocaleString() + " names screened so far";
 }
 
-function tickCountdown() {
-  // The schedule fires on the quarter hour, so the wait is knowable without
-  // asking the server anything.
-  const now = new Date();
-  const mins = 14 - (now.getUTCMinutes() % 15);
-  const secs = 59 - now.getUTCSeconds();
-  document.getElementById("next").textContent =
-    `next hunt ~${mins}:${String(secs).padStart(2, "0")}`;
+// The page used to count down to the next quarter hour, on the theory that
+// the cron said "*/15" so a hunt was always fifteen minutes away. GitHub does
+// not honour that: over the first 13.5 hours it fired the schedule 5 times,
+// not 54, because scheduled runs on a public repo are dropped under load. So
+// the timer ran to zero and nothing happened, over and over - it was counting
+// down to an event nobody had promised.
+//
+// There is no way to know when GitHub will next grant a runner, so the page
+// stops pretending it does and reports the one thing it can actually observe:
+// the hunter rewrites hits.json every twenty seconds while it is working, so
+// a recent timestamp means a run is live right now.
+let lastUpdated = null;
+
+function tickStatus() {
+  const dot = document.getElementById("dot");
+  const stamp = document.getElementById("stamp");
+  const next = document.getElementById("next");
+  if (!lastUpdated) return;
+
+  const idle = (Date.now() - lastUpdated) / 1000;
+  const live = idle < LIVE_WINDOW;
+  dot.style.background = live ? "var(--green)" : "var(--dead)";
+  dot.style.boxShadow = live ? "0 0 0 3px rgba(53,208,127,.15)" : "none";
+  dot.style.animation = live ? "" : "none";
+  stamp.textContent = live ? "hunting now" : "between hunts";
+  stamp.style.color = live ? "var(--green)" : "var(--muted)";
+  // How long ago is already in the facts strip as "last hunt"; repeating it
+  // here just put two different numbers for the same thing on one screen.
+  // The slot says why there is a wait instead, which is the part nobody can
+  // guess from a timestamp.
+  next.textContent = live
+    ? "publishing as it finds"
+    : "waiting on a free GitHub runner";
 }
 
 // ── released band ───────────────────────────────────────────────
@@ -489,22 +515,25 @@ async function load() {
     const r = await fetch("hits.json?t=" + Date.now(), { cache: "no-store" });
     if (!r.ok) throw new Error(r.status);
     const data = await r.json();
-    document.getElementById("stamp").textContent =
-      data.updated ? "updated " + ago(data.updated) + " ago" : "no data yet";
+    lastUpdated = data.updated ? Date.parse(data.updated) : null;
+    if (!lastUpdated) document.getElementById("stamp").textContent = "no data yet";
+    tickStatus();
     renderHero(data);
     renderReleased(data);
     renderFeed(data);
     renderBoards(data);
   } catch {
+    lastUpdated = null;
     document.getElementById("stamp").textContent = "feed unavailable";
     document.getElementById("dot").style.background = "var(--red)";
+    document.getElementById("dot").style.animation = "none";
   }
 }
 
 load();
 setInterval(load, 30000);
-tickCountdown();
-setInterval(tickCountdown, 1000);
+tickStatus();
+setInterval(tickStatus, 1000);
 mountChat();
 </script>
 </body>
