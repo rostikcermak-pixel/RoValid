@@ -7,3 +7,6 @@ data/proxies.txt
 data/names_to_check.txt
 results/
 logs/
+
+# Local hunt output; the live board file is written by the schedule only.
+hits.local.json

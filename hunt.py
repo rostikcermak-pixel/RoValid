@@ -29,7 +29,14 @@ from proxy import ProxyManager
 from rarity import rate
 import watchlist
 
+# The live file the page reads. It belongs to the scheduled run, which is
+# the only thing that should ever write it: a local test run holds a stale
+# snapshot, and committing that resets the totals the schedule has been
+# accumulating. It happened once - a hand-committed copy rolled the board
+# back from 4,000 names screened to 800 - so a local run now has to say
+# --out docs/hits.json to touch it at all.
 OUT = Path("docs/hits.json")
+LOCAL_OUT = Path("hits.local.json")
 
 # The page shows a column per length, newest first, and nobody scrolls past a
 # few dozen. Keeping the file small also keeps every scheduled run's commit
@@ -72,11 +79,11 @@ def draw(length: int, count: int, exclude: set[str]) -> list[str]:
     return out
 
 
-def load_existing() -> dict:
-    if not OUT.exists():
+def load_existing(out: Path) -> dict:
+    if not out.exists():
         return {"updated": None, "lengths": {}, "totals": {}}
     try:
-        return json.loads(OUT.read_text(encoding="utf-8"))
+        return json.loads(out.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         # A half-written file must not stop the next run from producing a
         # good one - the schedule has no operator to notice it failed.
@@ -176,10 +183,14 @@ async def main() -> int:
     ap.add_argument("--workers", type=int, default=8)
     ap.add_argument("--no-watch", action="store_true",
                     help="skip the watchlist pass and only draw random names")
+    ap.add_argument("--out", type=Path, default=LOCAL_OUT,
+                    help=f"where to write results (default {LOCAL_OUT}; the "
+                         f"scheduled run passes {OUT})")
     args = ap.parse_args()
 
     lengths = [int(x) for x in args.lengths.split(",") if x.strip()]
-    data = load_existing()
+    out = args.out
+    data = load_existing(out)
     data.setdefault("lengths", {})
     data.setdefault("totals", {})
     data.setdefault("released", [])
@@ -262,9 +273,9 @@ async def main() -> int:
             )
 
     data["updated"] = now
-    OUT.parent.mkdir(parents=True, exist_ok=True)
-    OUT.write_text(json.dumps(data, indent=1) + "\n", encoding="utf-8")
-    print(f"\n{fresh_total} new free name(s) -> {OUT}")
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps(data, indent=1) + "\n", encoding="utf-8")
+    print(f"\n{fresh_total} new free name(s) -> {out}")
     return 0
 
 
