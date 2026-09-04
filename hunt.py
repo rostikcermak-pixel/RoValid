@@ -223,10 +223,9 @@ async def main() -> int:
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     fresh_total = 0
 
-    async with aiohttp.ClientSession(
-        headers={"User-Agent": "Mozilla/5.0 (compatible; RoValid/1.0)"},
-        timeout=aiohttp.ClientTimeout(total=20, sock_connect=8),
-    ) as session:
+
+    async def work(session) -> None:
+        nonlocal fresh_total
 
         if not args.no_watch:
             names = watchlist.build(lengths)
@@ -271,6 +270,23 @@ async def main() -> int:
                 f"  len {length}: {budget:.0f}s, screened {checked:,}, "
                 f"survivors {survivors:,}, free {len(found)}", flush=True,
             )
+
+    async with aiohttp.ClientSession(
+        headers={"User-Agent": "Mozilla/5.0 (compatible; RoValid/1.0)"},
+        timeout=aiohttp.ClientTimeout(total=20, sock_connect=8),
+    ) as session:
+        # The per-pass budgets are checked between requests, and a single
+        # request can outlast one by minutes when the limiter is cooling
+        # things down - a 90-second run was still going at 300. Left alone
+        # that overruns the scheduled job's timeout, the job is killed, and
+        # the run commits nothing at all. This is the hard stop: whatever has
+        # been found by then still gets written.
+        hard_cap = args.minutes * 60 * 1.6
+        try:
+            await asyncio.wait_for(work(session), timeout=hard_cap)
+        except asyncio.TimeoutError:
+            print(f"  (hit the {hard_cap:.0f}s hard stop - saving what we have)",
+                  flush=True)
 
     data["updated"] = now
     out.parent.mkdir(parents=True, exist_ok=True)
