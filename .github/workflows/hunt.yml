@@ -48,7 +48,9 @@ jobs:
 
       - name: Hunt
         if: ${{ !inputs.bench }}
-        run: python hunt.py --minutes ${{ inputs.minutes || 8 }} --lengths 3,4,5
+        run: |
+          python hunt.py --minutes ${{ inputs.minutes || 8 }} \
+                         --lengths 3,4,5 --out docs/hits.json
 
       - name: Publish findings
         if: ${{ !inputs.bench }}
