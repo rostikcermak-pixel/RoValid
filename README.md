@@ -4,9 +4,45 @@
 
 No token, no login, no account needed — both endpoints it uses are public and unauthenticated.
 
+### 🔴 Live board — [rostikcermak-pixel.github.io/RoValid](https://rostikcermak-pixel.github.io/RoValid/)
+
+Names found free, updated every 15 minutes by a GitHub Action. Nothing to
+install and no PC left running: the hunt happens on GitHub, the page just
+reads what it committed. There is a chat under the board.
+
 > **Playing Minecraft instead?** There's a Minecraft version on the
 > [`minecraft`](https://github.com/rostikcermak-pixel/RoValid/tree/minecraft)
 > branch — same tool, pointed at the Mojang API.
+
+---
+
+## The live board
+
+[**rostikcermak-pixel.github.io/RoValid**](https://rostikcermak-pixel.github.io/RoValid/)
+
+`.github/workflows/hunt.yml` runs `hunt.py` every 15 minutes on GitHub's own
+machines and commits anything it finds to `docs/hits.json`. GitHub Pages
+serves that file, so the board is live without a server, a database, or a
+machine of yours being switched on.
+
+Two passes run each time:
+
+| pass | what it does |
+|---|---|
+| **watchlist** | Re-checks 3,600 names people would actually want — real words, and shapes that read like names. All taken today; a release lands in the gold band at the top. |
+| **hunt** | Draws fresh random names at 3, 4 and 5 characters and screens them. |
+
+The watchlist is the interesting half. Free names are not scarce — a
+one-minute sample found 183 free five-character names and **not one was
+digit-free**. Good names are taken, and only come back when somebody renames
+away from one, so the board watches for exactly that rather than hoping to
+stumble on a good name at random.
+
+Run it yourself against a local file instead of the live one:
+
+```bash
+python hunt.py --minutes 5 --lengths 3,4,5     # writes hits.local.json
+```
 
 ---
 
