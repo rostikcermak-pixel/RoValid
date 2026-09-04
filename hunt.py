@@ -27,6 +27,7 @@ from config import BATCH_MAX, Stats, is_valid_username
 from engine import AVAILABLE, MALFORMED_CHUNK, RobloxChecker, SharedCooldown
 from proxy import ProxyManager
 from rarity import rate
+import watchlist
 
 OUT = Path("docs/hits.json")
 
@@ -34,6 +35,7 @@ OUT = Path("docs/hits.json")
 # few dozen. Keeping the file small also keeps every scheduled run's commit
 # small, which matters when it commits every few minutes forever.
 KEEP_PER_LENGTH = 60
+KEEP_RELEASED = 40
 
 # Ordering on the page. Free names are not scarce - a one-minute sample found
 # 158 free five-character names, none of them digit-free - so listing by
@@ -116,18 +118,71 @@ async def hunt_length(
     return found, checked, survivors_seen
 
 
+async def watch_pass(
+    checker: RobloxChecker,
+    session: aiohttp.ClientSession,
+    names: list[str],
+    budget: float,
+    start: int = 0,
+) -> tuple[list[str], int, int]:
+    """Re-check the watchlist and return any name that has come free.
+
+    This is the pass worth having. The random hunt finds licence plates
+    because that is all that is left unclaimed; a name anyone would want is
+    taken, and only shows up here, on the run after somebody renamed away
+    from it.
+    """
+    freed: list[str] = []
+    checked = 0
+    started = time.monotonic()
+    # Resume where the last run stopped and wrap around. A budget always
+    # cuts this pass short, so starting from zero every time would watch the
+    # first few hundred names forever and never once look at the rest.
+    order = names[start:] + names[:start]
+    cursor = start
+
+    for i in range(0, len(order), BATCH_MAX):
+        # A run on a schedule has a hard job timeout, and this pass has no
+        # natural end - it will screen every name it is given and validate
+        # every survivor. Without a deadline it eats the whole run, which is
+        # exactly what it did the first time.
+        if time.monotonic() - started >= budget:
+            break
+        chunk = order[i:i + BATCH_MAX]
+        taken = await checker.batch_screen(session, chunk)
+        if taken is None or taken is MALFORMED_CHUNK:
+            continue
+        checked += len(chunk)
+        for name in chunk:
+            if name.lower() in taken:
+                continue
+            if time.monotonic() - started >= budget:
+                break
+            # Stage 1 only says no account holds it. The validator is what
+            # separates a genuine release from a name Roblox censors or
+            # reserves, and on a watchlist that distinction is the point.
+            outcome, _code = await checker.validate(session, name)
+            if outcome == AVAILABLE:
+                freed.append(name)
+        cursor = (start + i + len(chunk)) % len(names)
+    return freed, checked, cursor
+
+
 async def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--minutes", type=float, default=8.0,
                     help="total wall-clock budget (default 8)")
     ap.add_argument("--lengths", default="3,4,5")
     ap.add_argument("--workers", type=int, default=8)
+    ap.add_argument("--no-watch", action="store_true",
+                    help="skip the watchlist pass and only draw random names")
     args = ap.parse_args()
 
     lengths = [int(x) for x in args.lengths.split(",") if x.strip()]
     data = load_existing()
     data.setdefault("lengths", {})
     data.setdefault("totals", {})
+    data.setdefault("released", [])
 
     # Never re-offer a name the site has already listed, and never re-check
     # one we have already resolved.
@@ -149,7 +204,11 @@ async def main() -> int:
     # actually come from and gets the bulk of the time.
     weights = {3: 1.0, 4: 1.0}
     total_w = sum(weights.get(n, 4.0) for n in lengths)
-    seconds = args.minutes * 60
+    # The watchlist gets the first slice because it is the pass that can
+    # actually surface a name worth having; the random draw fills whatever
+    # time is left.
+    watch_budget = 0.0 if args.no_watch else args.minutes * 60 * 0.4
+    seconds = args.minutes * 60 - watch_budget
     now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     fresh_total = 0
 
@@ -157,6 +216,27 @@ async def main() -> int:
         headers={"User-Agent": "Mozilla/5.0 (compatible; RoValid/1.0)"},
         timeout=aiohttp.ClientTimeout(total=20, sock_connect=8),
     ) as session:
+
+        if not args.no_watch:
+            names = watchlist.build(lengths)
+            freed, watched, cursor = await watch_pass(
+                checker, session, names, watch_budget,
+                start=int(data.get("watch_cursor", 0)) % max(len(names), 1),
+            )
+            data["watch_cursor"] = cursor
+            already = {e["name"] for e in data["released"]}
+            for name in freed:
+                if name in already:
+                    continue          # still free from an earlier run
+                tier, weight = rate(name)
+                data["released"].insert(0, {
+                    "name": name, "found": now, "tier": tier, "weight": weight,
+                })
+            data["released"] = data["released"][:KEEP_RELEASED]
+            data["watching"] = len(names)
+            print(f"  watchlist: {watched:,} of {len(names):,} re-checked "
+                  f"(resuming at {cursor:,}), {len(freed)} free", flush=True)
+
         for length in lengths:
             budget = seconds * weights.get(length, 4.0) / total_w
             found, checked, survivors = await hunt_length(
