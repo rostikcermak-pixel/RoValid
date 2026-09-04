@@ -20,6 +20,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Callable
 
 import aiohttp
 
@@ -41,6 +42,10 @@ LOCAL_OUT = Path("hits.local.json")
 # The page shows a column per length, newest first, and nobody scrolls past a
 # few dozen. Keeping the file small also keeps every scheduled run's commit
 # small, which matters when it commits every few minutes forever.
+# How often the board may be rewritten mid-run. The scheduled job commits
+# whatever it sees, so this is really "how fresh the site is" - against a run
+# that now lasts most of an hour, twenty seconds is plenty.
+WRITE_EVERY = 20.0
 KEEP_PER_LENGTH = 60
 KEEP_RELEASED = 40
 
@@ -96,9 +101,14 @@ async def hunt_length(
     length: int,
     budget: float,
     seen: set[str],
-) -> tuple[list[str], int, int]:
-    """Return (free names, names screened, stage-2 survivors) in *budget*s."""
-    found: list[str] = []
+    record: Callable[[str], None],
+) -> tuple[int, int]:
+    """Screen names for *budget*s, calling *record* on each free one.
+
+    Finds are reported as they happen rather than returned in a batch: the
+    board is meant to be sat on, and a name that surfaces in the first
+    minute of an hour-long run should not wait for the run to end.
+    """
     checked = 0
     survivors_seen = 0
     started = time.monotonic()
@@ -121,8 +131,8 @@ async def hunt_length(
                 break
             outcome, _code = await checker.validate(session, name)
             if outcome == AVAILABLE:
-                found.append(name)
-    return found, checked, survivors_seen
+                record(name)
+    return checked, survivors_seen
 
 
 async def watch_pass(
@@ -130,8 +140,9 @@ async def watch_pass(
     session: aiohttp.ClientSession,
     names: list[str],
     budget: float,
+    record: Callable[[str], None],
     start: int = 0,
-) -> tuple[list[str], int, int]:
+) -> tuple[int, int]:
     """Re-check the watchlist and return any name that has come free.
 
     This is the pass worth having. The random hunt finds licence plates
@@ -139,7 +150,6 @@ async def watch_pass(
     taken, and only shows up here, on the run after somebody renamed away
     from it.
     """
-    freed: list[str] = []
     checked = 0
     started = time.monotonic()
     # Resume where the last run stopped and wrap around. A budget always
@@ -170,9 +180,9 @@ async def watch_pass(
             # reserves, and on a watchlist that distinction is the point.
             outcome, _code = await checker.validate(session, name)
             if outcome == AVAILABLE:
-                freed.append(name)
+                record(name)
         cursor = (start + i + len(chunk)) % len(names)
-    return freed, checked, cursor
+    return checked, cursor
 
 
 async def main() -> int:
@@ -220,8 +230,32 @@ async def main() -> int:
     # time is left.
     watch_budget = 0.0 if args.no_watch else args.minutes * 60 * 0.4
     seconds = args.minutes * 60 - watch_budget
-    now = datetime.now(timezone.utc).isoformat(timespec="seconds")
     fresh_total = 0
+    last_write = 0.0
+
+    def stamp() -> str:
+        return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+    def publish(force: bool = False) -> None:
+        """Write the board out mid-run.
+
+        The scheduled job commits this file while the hunt is still going, so
+        a reader can catch it at any moment. The write goes to a temp file and
+        is renamed over the real one, which is atomic on POSIX - a reader sees
+        either the old file or the new one, never half a JSON document.
+
+        Throttled, because a good minute can turn up finds faster than there
+        is any point rewriting the file.
+        """
+        nonlocal last_write
+        if not force and time.monotonic() - last_write < WRITE_EVERY:
+            return
+        last_write = time.monotonic()
+        data["updated"] = stamp()
+        out.parent.mkdir(parents=True, exist_ok=True)
+        tmp = out.with_name(out.name + ".tmp")
+        tmp.write_text(json.dumps(data, indent=1) + "\n", encoding="utf-8")
+        tmp.replace(out)
 
 
     async def work(session) -> None:
@@ -229,47 +263,63 @@ async def main() -> int:
 
         if not args.no_watch:
             names = watchlist.build(lengths)
-            freed, watched, cursor = await watch_pass(
-                checker, session, names, watch_budget,
+            data["watching"] = len(names)
+            already = {e["name"] for e in data["released"]}
+            freed = 0
+
+            def release(name: str) -> None:
+                nonlocal freed
+                if name in already:
+                    return            # still free from an earlier run
+                already.add(name)
+                freed += 1
+                tier, weight = rate(name)
+                data["released"].insert(0, {
+                    "name": name, "found": stamp(), "tier": tier,
+                    "weight": weight,
+                })
+                del data["released"][KEEP_RELEASED:]
+                publish()
+
+            watched, cursor = await watch_pass(
+                checker, session, names, watch_budget, release,
                 start=int(data.get("watch_cursor", 0)) % max(len(names), 1),
             )
             data["watch_cursor"] = cursor
-            already = {e["name"] for e in data["released"]}
-            for name in freed:
-                if name in already:
-                    continue          # still free from an earlier run
-                tier, weight = rate(name)
-                data["released"].insert(0, {
-                    "name": name, "found": now, "tier": tier, "weight": weight,
-                })
-            data["released"] = data["released"][:KEEP_RELEASED]
-            data["watching"] = len(names)
             print(f"  watchlist: {watched:,} of {len(names):,} re-checked "
-                  f"(resuming at {cursor:,}), {len(freed)} free", flush=True)
+                  f"(resuming at {cursor:,}), {freed} free", flush=True)
+            publish(force=True)
 
         for length in lengths:
             budget = seconds * weights.get(length, 4.0) / total_w
-            found, checked, survivors = await hunt_length(
-                checker, session, length, budget, seen,
-            )
             key = str(length)
-            entries = data["lengths"].get(key, [])
-            for name in found:
+            totals = data["totals"].setdefault(key, {"checked": 0, "found": 0})
+            hits = 0
+
+            def keep(name: str, key=key, totals=totals) -> None:
+                nonlocal fresh_total, hits
                 tier, weight = rate(name)
+                entries = data["lengths"].setdefault(key, [])
                 entries.append({
-                    "name": name, "found": now,
+                    "name": name, "found": stamp(),
                     "tier": tier, "weight": weight,
                 })
-            entries.sort(key=_order)
-            data["lengths"][key] = entries[:KEEP_PER_LENGTH]
-            totals = data["totals"].setdefault(key, {"checked": 0, "found": 0})
+                entries.sort(key=_order)
+                del entries[KEEP_PER_LENGTH:]
+                totals["found"] += 1
+                fresh_total += 1
+                hits += 1
+                publish()
+
+            checked, survivors = await hunt_length(
+                checker, session, length, budget, seen, keep,
+            )
             totals["checked"] += checked
-            totals["found"] += len(found)
-            fresh_total += len(found)
             print(
                 f"  len {length}: {budget:.0f}s, screened {checked:,}, "
-                f"survivors {survivors:,}, free {len(found)}", flush=True,
+                f"survivors {survivors:,}, free {hits}", flush=True,
             )
+            publish(force=True)
 
     async with aiohttp.ClientSession(
         headers={"User-Agent": "Mozilla/5.0 (compatible; RoValid/1.0)"},
@@ -288,9 +338,7 @@ async def main() -> int:
             print(f"  (hit the {hard_cap:.0f}s hard stop - saving what we have)",
                   flush=True)
 
-    data["updated"] = now
-    out.parent.mkdir(parents=True, exist_ok=True)
-    out.write_text(json.dumps(data, indent=1) + "\n", encoding="utf-8")
+    publish(force=True)
     print(f"\n{fresh_total} new free name(s) -> {out}")
     return 0
 
