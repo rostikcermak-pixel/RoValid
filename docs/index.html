@@ -45,6 +45,31 @@ h1 span{color:var(--accent)}
 @keyframes pulse{50%{opacity:.35}}
 @media (prefers-reduced-motion:reduce){.dot{animation:none}}
 
+/* ── released band ────────────────────────────────────────── */
+/* The one part of the page worth racing for, so it is the one place that
+   gets weight: full width, above the columns, gold. Everything below stays
+   quiet by comparison. */
+.released{margin-top:22px;border:1px solid rgba(240,180,41,.34);
+  border-radius:10px;background:linear-gradient(180deg,rgba(240,180,41,.07),
+  rgba(240,180,41,.02));padding:16px 18px;box-shadow:var(--shadow)}
+.released h2{margin:0 0 3px;font-size:12px;font-weight:700;
+  text-transform:uppercase;letter-spacing:.13em;color:var(--gold)}
+.released .sub{margin:0 0 13px;font-size:12.5px;color:var(--muted)}
+.freed{list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:8px}
+.freed button{display:flex;align-items:baseline;gap:9px;cursor:pointer;
+  font:inherit;color:var(--gold);background:rgba(240,180,41,.1);
+  border:1px solid rgba(240,180,41,.3);border-radius:7px;padding:9px 13px}
+.freed button:hover,.freed button:focus-visible{background:rgba(240,180,41,.19);
+  outline:none}
+.freed button:focus-visible{box-shadow:0 0 0 2px rgba(240,180,41,.4)}
+.freed .nm{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:17px;
+  font-weight:600;letter-spacing:.04em}
+.freed .when{font-size:11px;color:var(--muted);
+  font-family:"IBM Plex Mono",monospace}
+.watching{color:var(--muted);font-size:13px;margin:0}
+.watching b{color:var(--ink-dim);font-weight:600;
+  font-family:"IBM Plex Mono",monospace}
+
 /* ── the three boards ─────────────────────────────────────── */
 /* align-items:start so a column that found nothing sits at its own height
    instead of being stretched to match the tall one beside it. */
@@ -113,6 +138,10 @@ a{color:var(--accent)}
   <div class="status"><span class="dot" id="dot"></span><span id="stamp">loading…</span></div>
 </header>
 
+<section class="released" id="released" hidden>
+  <!-- the payoff band: names off the watchlist that just came free -->
+</section>
+
 <main class="boards" id="boards">
   <!-- rendered from hits.json -->
 </main>
@@ -137,7 +166,12 @@ a{color:var(--accent)}
 // Fill these in after enabling Discussions on the repo and installing the
 // giscus app, then this block becomes the comment thread. Until then the
 // page says what is missing rather than rendering an empty box.
-const GISCUS = { repo: "rostikcermak-pixel/RoValid", repoId: "", categoryId: "" };
+const GISCUS = {
+  repo: "rostikcermak-pixel/RoValid",
+  repoId: "R_kgDOUKnJKA",
+  category: "General",
+  categoryId: "DIC_kwDOUKnJKM4DE0HZ",
+};
 
 function mountChat() {
   const host = document.getElementById("chat");
@@ -156,9 +190,14 @@ function mountChat() {
   s.src = "https://giscus.app/client.js";
   s.crossOrigin = "anonymous";
   s.async = true;
+  // theme is pinned dark rather than giscus's preferred_color_scheme: the
+  // board commits to one dark surface, so a light-mode visitor would
+  // otherwise get a white comment box dropped into the middle of it.
   Object.assign(s.dataset, {
-    repo: GISCUS.repo, repoId: GISCUS.repoId, categoryId: GISCUS.categoryId,
-    mapping: "pathname", reactionsEnabled: "1", emitMetadata: "0",
+    repo: GISCUS.repo, repoId: GISCUS.repoId,
+    category: GISCUS.category, categoryId: GISCUS.categoryId,
+    mapping: "pathname", strict: "0",
+    reactionsEnabled: "1", emitMetadata: "0",
     inputPosition: "top", theme: "dark_dimmed", lang: "en",
   });
   host.appendChild(s);
@@ -219,7 +258,67 @@ function emptyEl(len, checked) {
   return d;
 }
 
+function renderReleased(data) {
+  const host = document.getElementById("released");
+  const freed = data.released || [];
+  const watching = data.watching || 0;
+
+  // Hide the band entirely when nothing is being watched yet - an empty
+  // gold panel promises something the page cannot deliver.
+  if (!watching && !freed.length) {
+    host.hidden = true;
+    return;
+  }
+  host.hidden = false;
+  host.textContent = "";
+
+  const h = document.createElement("h2");
+  h.textContent = "Just released";
+  const sub = document.createElement("p");
+  sub.className = "sub";
+  sub.textContent = freed.length
+    ? "Names somebody gave up. First one to the signup page gets it."
+    : "Nothing yet.";
+  host.append(h, sub);
+
+  if (freed.length) {
+    const ul = document.createElement("ul");
+    ul.className = "freed";
+    freed.forEach((e) => {
+      const li = document.createElement("li");
+      const b = document.createElement("button");
+      b.type = "button";
+      b.innerHTML = '<span class="nm"></span><span class="when"></span>';
+      b.querySelector(".nm").textContent = e.name;
+      b.querySelector(".when").textContent = ago(e.found);
+      b.addEventListener("click", async () => {
+        const w = b.querySelector(".when");
+        const was = w.textContent;
+        try {
+          await navigator.clipboard.writeText(e.name);
+          w.textContent = "copied";
+        } catch {
+          w.textContent = "copy failed";
+        }
+        setTimeout(() => { w.textContent = was; }, 1400);
+      });
+      li.appendChild(b);
+      ul.appendChild(li);
+    });
+    host.appendChild(ul);
+  } else {
+    const p = document.createElement("p");
+    p.className = "watching";
+    p.innerHTML = "Watching <b></b> names people would actually want — " +
+      "words, and anything that reads like a name. They are all taken right " +
+      "now. When somebody renames away from one, it lands here.";
+    p.querySelector("b").textContent = watching.toLocaleString();
+    host.appendChild(p);
+  }
+}
+
 function render(data) {
+  renderReleased(data);
   const boards = document.getElementById("boards");
   boards.textContent = "";
   let grand = 0;
