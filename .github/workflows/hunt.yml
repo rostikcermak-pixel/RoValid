@@ -63,6 +63,12 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           publish() {
+            # The hunt keeps writing docs/hits.json while this runs. A write
+            # landing inside the pull below can leave a rebase half-applied,
+            # and every later publish in the run would then fail on a repo
+            # stuck mid-rebase - 50 minutes of findings lost to a state
+            # nothing clears until the next job checks out fresh.
+            git rebase --abort 2>/dev/null || true
             git add docs/hits.json
             # Most cycles turn up nothing, and an empty commit every two
             # minutes would bury the history for no gain.
