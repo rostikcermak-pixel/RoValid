@@ -4,147 +4,195 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>RoValid Live</title>
-<meta name="description" content="Roblox usernames the hunter found free, ranked by how good they are. Updated every 15 minutes.">
+<meta name="description" content="Roblox usernames found free, streamed as they land. A hunter runs on GitHub every 15 minutes.">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;700;900&family=IBM+Plex+Mono:wght@400;600&display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
 <style>
-/* A live board, committed to one dark world on purpose - it is a departures
-   display, not a document, and it should look the same to everyone watching
-   it. Every colour is painted explicitly so the page never borrows a host
-   theme's ground. */
+/* A terminal, not a document. The desktop tool's whole character is the
+   stream scrolling past with a hit slamming into it, so the page is built
+   around that rather than around a list. Committed dark on purpose: this is
+   a readout, and it should look the same to everyone watching it. */
 :root{
-  --ground:#0B0E14; --panel:#131824; --panel-2:#171D2B;
-  --line:#232A3A; --line-soft:#1B2130;
-  --ink:#E4E8F1; --ink-dim:#9BA6BE; --muted:#6E7994;
-  --accent:#4C9AFF; --gold:#F0B429; --green:#35D07F; --dead:#4A5468;
-  --shadow:0 1px 0 rgba(255,255,255,.03), 0 8px 24px rgba(0,0,0,.45);
+  --ground:#07090D; --panel:#0E131C; --panel-2:#131A26; --rail:#0A0F17;
+  --line:#1D2532; --line-soft:#161D29;
+  --ink:#DCE3EF; --ink-dim:#8E9AB4; --muted:#67728C; --dead:#3C4557;
+  --accent:#4C9AFF; --green:#35D07F; --gold:#F5B72E; --red:#FF5C57;
   color-scheme:dark;
 }
 *{box-sizing:border-box}
 html,body{margin:0}
 body{
   background:var(--ground); color:var(--ink);
-  font-family:Archivo,"Helvetica Neue",Arial,sans-serif;
-  font-size:15px; line-height:1.5;
-  -webkit-font-smoothing:antialiased;
+  font-family:"IBM Plex Mono",ui-monospace,SFMono-Regular,Menlo,monospace;
+  font-size:14px; line-height:1.5; -webkit-font-smoothing:antialiased;
 }
-.wrap{max-width:1180px;margin:0 auto;padding:28px 20px 72px}
+.wrap{max-width:1220px;margin:0 auto;padding:24px 18px 80px}
+h1,h2,h3{font-family:Archivo,"Helvetica Neue",Arial,sans-serif}
 
-/* ── masthead ─────────────────────────────────────────────── */
-header{display:flex;flex-wrap:wrap;align-items:baseline;gap:14px 22px;
-  padding-bottom:18px;border-bottom:1px solid var(--line)}
-h1{font-size:26px;font-weight:900;letter-spacing:-.02em;margin:0}
+/* ── masthead ───────────────────────────────────────────────── */
+.top{display:flex;flex-wrap:wrap;align-items:flex-end;gap:18px 26px;
+  padding-bottom:16px;border-bottom:1px solid var(--line)}
+h1{font-size:23px;font-weight:800;letter-spacing:-.02em;margin:0}
 h1 span{color:var(--accent)}
-.tag{color:var(--muted);font-size:13.5px;max-width:52ch}
-.status{margin-left:auto;display:flex;align-items:center;gap:9px;
-  font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:12.5px;
-  color:var(--ink-dim);white-space:nowrap}
-.dot{width:8px;height:8px;border-radius:50%;background:var(--green);
-  box-shadow:0 0 0 3px rgba(53,208,127,.16);animation:pulse 2.4s ease-in-out infinite}
-@keyframes pulse{50%{opacity:.35}}
+.blurb{color:var(--muted);font-size:12.5px;max-width:46ch;margin:5px 0 0}
+.live{margin-left:auto;display:flex;align-items:center;gap:16px;
+  font-size:12px;color:var(--ink-dim);white-space:nowrap}
+.pip{display:inline-flex;align-items:center;gap:7px}
+.dot{width:7px;height:7px;border-radius:50%;background:var(--green);
+  box-shadow:0 0 0 3px rgba(53,208,127,.15);animation:pulse 2.2s infinite}
+@keyframes pulse{50%{opacity:.3}}
 @media (prefers-reduced-motion:reduce){.dot{animation:none}}
 
-/* ── released band ────────────────────────────────────────── */
-/* The one part of the page worth racing for, so it is the one place that
-   gets weight: full width, above the columns, gold. Everything below stays
-   quiet by comparison. */
-.released{margin-top:22px;border:1px solid rgba(240,180,41,.34);
-  border-radius:10px;background:linear-gradient(180deg,rgba(240,180,41,.07),
-  rgba(240,180,41,.02));padding:16px 18px;box-shadow:var(--shadow)}
-.released h2{margin:0 0 3px;font-size:12px;font-weight:700;
-  text-transform:uppercase;letter-spacing:.13em;color:var(--gold)}
-.released .sub{margin:0 0 13px;font-size:12.5px;color:var(--muted)}
-.freed{list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:8px}
-.freed button{display:flex;align-items:baseline;gap:9px;cursor:pointer;
-  font:inherit;color:var(--gold);background:rgba(240,180,41,.1);
-  border:1px solid rgba(240,180,41,.3);border-radius:7px;padding:9px 13px}
-.freed button:hover,.freed button:focus-visible{background:rgba(240,180,41,.19);
-  outline:none}
-.freed button:focus-visible{box-shadow:0 0 0 2px rgba(240,180,41,.4)}
-.freed .nm{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:17px;
-  font-weight:600;letter-spacing:.04em}
-.freed .when{font-size:11px;color:var(--muted);
-  font-family:"IBM Plex Mono",monospace}
-.watching{color:var(--muted);font-size:13px;margin:0}
-.watching b{color:var(--ink-dim);font-weight:600;
-  font-family:"IBM Plex Mono",monospace}
+/* ── hero counter, drawn the way the desktop tool draws it ──── */
+.hero{display:grid;grid-template-columns:auto 1fr;gap:0 26px;
+  align-items:center;padding:22px 0 20px;border-bottom:1px solid var(--line)}
+.count{font-size:11px;line-height:1.04;letter-spacing:.5px;white-space:pre;
+  color:var(--green);font-weight:600;
+  text-shadow:0 0 18px rgba(53,208,127,.28)}
+.count.zero{color:var(--dead);text-shadow:none}
+.count-label{font-family:Archivo,sans-serif;font-size:11px;font-weight:600;
+  letter-spacing:.19em;text-transform:uppercase;color:var(--green);
+  margin-top:9px}
+.count-label.zero{color:var(--muted)}
+.facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(122px,1fr));
+  gap:1px;background:var(--line-soft);border:1px solid var(--line-soft);
+  border-radius:8px;overflow:hidden}
+.fact{background:var(--panel);padding:11px 13px}
+.fact b{display:block;font-size:19px;font-weight:600;letter-spacing:-.01em;
+  font-variant-numeric:tabular-nums}
+.fact small{display:block;color:var(--muted);font-size:10.5px;
+  text-transform:uppercase;letter-spacing:.11em;margin-top:3px}
 
-/* ── the three boards ─────────────────────────────────────── */
-/* align-items:start so a column that found nothing sits at its own height
-   instead of being stretched to match the tall one beside it. */
-.boards{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;
+/* ── the stream: the point of the page ─────────────────────── */
+.streamwrap{margin-top:24px;border:1px solid var(--line);border-radius:10px;
+  background:var(--rail);overflow:hidden}
+.streamhead{display:flex;align-items:center;gap:12px;padding:11px 15px;
+  background:var(--panel);border-bottom:1px solid var(--line)}
+.streamhead h2{margin:0;font-size:11.5px;font-weight:600;letter-spacing:.16em;
+  text-transform:uppercase;color:var(--ink-dim)}
+.streamhead .note{margin-left:auto;font-size:11px;color:var(--muted)}
+.stream{margin:0;padding:8px 0;list-style:none;height:420px;
+  overflow-y:auto;scrollbar-width:thin}
+/* A fixed height cuts whatever row happens to straddle the edge. Fading the
+   last few pixels turns that slice into an obvious "keep scrolling" instead
+   of a half-drawn row that looks broken. */
+.stream,.rows{mask-image:linear-gradient(180deg,#000 calc(100% - 26px),transparent);
+  -webkit-mask-image:linear-gradient(180deg,#000 calc(100% - 26px),transparent)}
+.stream:not(:hover),.rows:not(:hover){scrollbar-color:var(--line) transparent}
+.stream li{padding:0 6px}
+.line{display:flex;align-items:center;gap:11px;padding:6px 11px;
+  border-radius:5px;width:100%;border:0;background:transparent;color:inherit;
+  font:inherit;text-align:left;cursor:pointer}
+.line:hover,.line:focus-visible{background:var(--panel-2);outline:none}
+.line:focus-visible{box-shadow:inset 0 0 0 1px var(--accent)}
+.mark{width:13px;color:var(--muted);flex:none}
+.nm{font-size:15px;font-weight:600;letter-spacing:.05em;min-width:8ch}
+.tag{font-size:9.5px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;
+  padding:2px 6px;border-radius:3px;background:rgba(103,114,140,.16);
+  color:var(--muted);flex:none}
+.tag.len{background:transparent;color:var(--dead);padding-left:0;letter-spacing:.14em}
+.when{margin-left:auto;font-size:11px;color:var(--dead);
+  font-variant-numeric:tabular-nums;flex:none}
+/* Colour is spent on rarity and nowhere else. A page where everything glows
+   has no way left to say "this one matters". */
+.t-legendary .nm,.t-legendary .mark{color:var(--gold)}
+.t-legendary .tag{background:rgba(245,183,46,.16);color:var(--gold)}
+.t-epic .nm,.t-epic .mark{color:var(--green)}
+.t-epic .tag{background:rgba(53,208,127,.15);color:var(--green)}
+.t-rare .nm,.t-rare .mark{color:var(--accent)}
+.t-rare .tag{background:rgba(76,154,255,.15);color:var(--accent)}
+.t-plain .nm{color:var(--ink-dim)}
+.t-junk .nm{color:var(--muted)}
+/* The desktop tool slams a hit in as a full-width slab; the good tiers get
+   the same treatment here so your eye catches them without reading. */
+.slab{background:linear-gradient(90deg,rgba(245,183,46,.14),transparent 62%);
+  box-shadow:inset 2px 0 0 var(--gold)}
+.slab.epic{background:linear-gradient(90deg,rgba(53,208,127,.13),transparent 62%);
+  box-shadow:inset 2px 0 0 var(--green)}
+.arrive{animation:arrive .42s cubic-bezier(.2,.9,.3,1)}
+@keyframes arrive{
+  from{opacity:0;transform:translateX(-14px);background:rgba(76,154,255,.16)}
+  to{opacity:1;transform:none}
+}
+@media (prefers-reduced-motion:reduce){.arrive{animation:none}}
+.streamfoot{padding:9px 15px;border-top:1px solid var(--line);
+  background:var(--panel);font-size:11px;color:var(--muted)}
+
+/* ── released ───────────────────────────────────────────────── */
+.released{margin-top:22px;border:1px solid rgba(245,183,46,.32);
+  border-radius:10px;padding:15px 17px;
+  background:linear-gradient(180deg,rgba(245,183,46,.07),rgba(245,183,46,.01))}
+.released h2{margin:0 0 3px;font-size:11px;font-weight:600;letter-spacing:.16em;
+  text-transform:uppercase;color:var(--gold)}
+.released p{margin:0;font-size:12px;color:var(--muted)}
+.freed{list-style:none;margin:12px 0 0;padding:0;display:flex;flex-wrap:wrap;gap:8px}
+.freed button{display:flex;align-items:baseline;gap:9px;cursor:pointer;font:inherit;
+  color:var(--gold);background:rgba(245,183,46,.1);border-radius:6px;
+  border:1px solid rgba(245,183,46,.3);padding:8px 12px}
+.freed button:hover,.freed button:focus-visible{background:rgba(245,183,46,.2);outline:none}
+.freed .nm{font-size:16px}
+
+/* ── columns ────────────────────────────────────────────────── */
+.boards{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;
   margin-top:22px;align-items:start}
-@media (max-width:860px){.boards{grid-template-columns:1fr}}
-.board{background:var(--panel);border:1px solid var(--line);border-radius:10px;
-  box-shadow:var(--shadow);display:flex;flex-direction:column;overflow:hidden}
-.board-head{display:flex;align-items:baseline;gap:10px;padding:14px 16px;
+@media (max-width:820px){.boards{grid-template-columns:1fr}}
+.board{border:1px solid var(--line);border-radius:9px;background:var(--panel);
+  overflow:hidden}
+.bh{display:flex;align-items:baseline;gap:9px;padding:11px 14px;
   border-bottom:1px solid var(--line-soft);background:var(--panel-2)}
-.board-head b{font-size:17px;font-weight:700;letter-spacing:-.01em}
-.board-head .n{margin-left:auto;font-family:"IBM Plex Mono",monospace;
-  font-size:12px;color:var(--muted);font-variant-numeric:tabular-nums}
-.rows{list-style:none;margin:0;padding:6px;display:flex;flex-direction:column;
-  gap:2px;max-height:460px;overflow-y:auto}
-.row{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:6px;
-  border:0;width:100%;text-align:left;background:transparent;color:inherit;
-  font:inherit;cursor:pointer}
-.row:hover,.row:focus-visible{background:var(--panel-2);outline:none}
-.row:focus-visible{box-shadow:inset 0 0 0 1px var(--accent)}
-.nm{font-family:"IBM Plex Mono",ui-monospace,monospace;font-size:16px;
-  font-weight:600;letter-spacing:.04em}
-.chip{font-size:10.5px;font-weight:700;text-transform:uppercase;
-  letter-spacing:.09em;padding:2px 7px;border-radius:3px;
-  background:rgba(110,121,148,.16);color:var(--muted)}
-/* Rarity is the whole point of the board, so it is the only place colour is
-   spent. Everything else stays quiet. */
-.t-legendary .chip{background:rgba(240,180,41,.16);color:var(--gold)}
-.t-legendary .nm{color:var(--gold)}
-.t-epic .chip{background:rgba(53,208,127,.15);color:var(--green)}
-.t-epic .nm{color:var(--green)}
-.t-rare .chip{background:rgba(76,154,255,.16);color:var(--accent)}
-.t-junk .nm,.t-junk .chip{color:var(--dead)}
-.ago{margin-left:auto;font-family:"IBM Plex Mono",monospace;font-size:11.5px;
-  color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
-.copied{color:var(--green)}
+.bh b{font-family:Archivo,sans-serif;font-size:14px;font-weight:600}
+.bh span{margin-left:auto;font-size:11px;color:var(--muted);
+  font-variant-numeric:tabular-nums}
+.rows{list-style:none;margin:0;padding:5px;max-height:330px;overflow-y:auto}
+.empty{padding:26px 16px;text-align:center;color:var(--muted);font-size:12px}
+.empty b{display:block;font-size:26px;color:var(--dead);margin-bottom:7px}
 
-/* A column that has never produced anything is the most interesting thing on
-   the page, so it gets a real state rather than blank space. */
-.empty{padding:30px 18px;text-align:center;color:var(--muted)}
-.empty .big{font-family:"IBM Plex Mono",monospace;font-size:30px;
-  font-weight:600;color:var(--dead);display:block;margin-bottom:8px}
-.empty p{margin:0;font-size:13px;line-height:1.55}
-
-/* ── chat ─────────────────────────────────────────────────── */
-.talk{margin-top:34px;background:var(--panel);border:1px solid var(--line);
-  border-radius:10px;padding:20px;box-shadow:var(--shadow)}
-.talk h2{margin:0 0 6px;font-size:18px;font-weight:700}
-.talk p{margin:0 0 14px;color:var(--muted);font-size:13.5px;max-width:62ch}
-.setup{font-family:"IBM Plex Mono",monospace;font-size:12.5px;color:var(--ink-dim);
-  background:var(--ground);border:1px solid var(--line-soft);border-radius:7px;
-  padding:14px 16px;overflow-x:auto;line-height:1.7}
-.setup b{color:var(--accent);font-weight:600}
-footer{margin-top:26px;color:var(--muted);font-size:12.5px;
-  display:flex;flex-wrap:wrap;gap:8px 18px}
+/* ── chat ───────────────────────────────────────────────────── */
+.talk{margin-top:26px;border:1px solid var(--line);border-radius:10px;
+  background:var(--panel);padding:18px}
+.talk h2{margin:0 0 4px;font-size:16px;font-weight:600}
+.talk p{margin:0 0 14px;color:var(--muted);font-size:12.5px;max-width:60ch}
+footer{margin-top:22px;display:flex;flex-wrap:wrap;gap:7px 18px;
+  color:var(--muted);font-size:11.5px}
 a{color:var(--accent)}
 </style>
 </head>
 <body>
 <div class="wrap">
 
-<header>
-  <h1>RoValid <span>Live</span></h1>
-  <p class="tag">Roblox usernames found free, ranked by how good they are. The
-     hunter runs on GitHub every 15 minutes. Click a name to copy it.</p>
-  <div class="status"><span class="dot" id="dot"></span><span id="stamp">loading…</span></div>
+<header class="top">
+  <div>
+    <h1>RoValid <span>Live</span></h1>
+    <p class="blurb">Roblox usernames found free, ranked by how good they are.
+       Click any name to copy it.</p>
+  </div>
+  <div class="live">
+    <span class="pip"><span class="dot" id="dot"></span><span id="stamp">loading</span></span>
+    <span id="next"></span>
+  </div>
 </header>
 
-<section class="released" id="released" hidden>
-  <!-- the payoff band: names off the watchlist that just came free -->
+<section class="hero">
+  <div>
+    <div class="count" id="count">   </div>
+    <div class="count-label" id="countLabel">found</div>
+  </div>
+  <div class="facts" id="facts"></div>
 </section>
 
-<main class="boards" id="boards">
-  <!-- rendered from hits.json -->
-</main>
+<section class="streamwrap">
+  <div class="streamhead">
+    <h2>Feed</h2>
+    <span class="note" id="feedNote"></span>
+  </div>
+  <ul class="stream" id="stream"></ul>
+  <div class="streamfoot" id="streamFoot"></div>
+</section>
+
+<section class="released" id="released" hidden></section>
+
+<main class="boards" id="boards"></main>
 
 <section class="talk">
   <h2>Talk</h2>
@@ -154,18 +202,14 @@ a{color:var(--accent)}
 </section>
 
 <footer>
-  <span id="totals"></span>
+  <span id="foot"></span>
   <span><a href="https://github.com/rostikcermak-pixel/RoValid">Source on GitHub</a></span>
-  <span>A free name here may be gone by the time you read it — that is the game.</span>
+  <span>A name here may be gone by the time you read it — that is the game.</span>
 </footer>
 
 </div>
 
 <script>
-// ── chat ──────────────────────────────────────────────────────
-// Fill these in after enabling Discussions on the repo and installing the
-// giscus app, then this block becomes the comment thread. Until then the
-// page says what is missing rather than rendering an empty box.
 const GISCUS = {
   repo: "rostikcermak-pixel/RoValid",
   repoId: "R_kgDOUKnJKA",
@@ -173,41 +217,36 @@ const GISCUS = {
   categoryId: "DIC_kwDOUKnJKM4DE0HZ",
 };
 
-function mountChat() {
-  const host = document.getElementById("chat");
-  if (!GISCUS.repoId || !GISCUS.categoryId) {
-    host.innerHTML =
-      '<div class="setup">Chat is not switched on yet. Two steps:<br><br>' +
-      '1 &nbsp;Repo <b>Settings &rarr; General &rarr; Features</b>, tick <b>Discussions</b><br>' +
-      '2 &nbsp;Visit <b>giscus.app</b>, enter this repo, copy the ' +
-      '<b>repoId</b> and <b>categoryId</b> it gives you into ' +
-      '<b>docs/index.html</b><br><br>' +
-      'Posting needs a GitHub account, which is the point — it keeps the ' +
-      'board from turning into a spam wall.</div>';
-    return;
-  }
-  const s = document.createElement("script");
-  s.src = "https://giscus.app/client.js";
-  s.crossOrigin = "anonymous";
-  s.async = true;
-  // theme is pinned dark rather than giscus's preferred_color_scheme: the
-  // board commits to one dark surface, so a light-mode visitor would
-  // otherwise get a white comment box dropped into the middle of it.
-  Object.assign(s.dataset, {
-    repo: GISCUS.repo, repoId: GISCUS.repoId,
-    category: GISCUS.category, categoryId: GISCUS.categoryId,
-    mapping: "pathname", strict: "0",
-    reactionsEnabled: "1", emitMetadata: "0",
-    inputPosition: "top", theme: "dark_dimmed", lang: "en",
-  });
-  host.appendChild(s);
+const LENGTHS = ["3", "4", "5"];
+const SPACE = { "3": 46656, "4": 1679616, "5": 60466176 };
+const TIER_ORDER = ["legendary", "epic", "rare", "solid", "plain", "junk"];
+
+// Ported from the desktop tool's panel. A terminal cannot make text bigger,
+// so the number people watch is drawn rather than typed.
+const GLYPH = {
+  "0": ["█▀█","█ █","█▄█"], "1": [" ▄█","  █","  █"],
+  "2": ["▀▀█","▄▀▀","█▄▄"], "3": ["▀▀█"," ▀█","▀▀█"],
+  "4": ["█ █","▀▀█","  █"], "5": ["█▀▀","▀▀█","▀▀█"],
+  "6": ["█▀▀","█▀█","█▄█"], "7": ["▀▀█","  █","  █"],
+  "8": ["█▀█","█▀█","█▄█"], "9": ["█▀█","▀▀█","▀▀█"],
+  ",": ["   ","   ","▗  "], ".": ["   ","   ","▄  "],
+  "K": ["█ █","██ ","█ █"], "M": ["█▄█","█ █","█ █"],
+};
+
+function abbreviate(n) {
+  if (n < 1000) return String(n);
+  if (n < 999950) return (n / 1000).toFixed(1).replace(/\.0$/, "") + "K";
+  return (n / 1e6).toFixed(1).replace(/\.0$/, "") + "M";
 }
 
-// ── board ─────────────────────────────────────────────────────
-const LENGTHS = ["3", "4", "5"];
-// The whole space per length, so an empty column can say how much of it has
-// been ruled out instead of just showing nothing.
-const SPACE = { "3": 46656, "4": 1679616, "5": 60466176 };
+function bigNumber(n) {
+  const rows = ["", "", ""];
+  for (const ch of abbreviate(n)) {
+    const g = GLYPH[ch] || ["   ", "   ", "   "];
+    for (let i = 0; i < 3; i++) rows[i] += g[i] + " ";
+  }
+  return rows.join("\n");
+}
 
 function ago(iso) {
   const s = Math.max(0, (Date.now() - new Date(iso)) / 1000);
@@ -217,71 +256,160 @@ function ago(iso) {
   return Math.round(s / 86400) + "d";
 }
 
-function rowEl(entry) {
+async function copy(name, el) {
+  const was = el.textContent;
+  try { await navigator.clipboard.writeText(name); el.textContent = "copied"; }
+  catch { el.textContent = "copy failed"; }
+  setTimeout(() => { el.textContent = was; }, 1400);
+}
+
+function lineEl(entry, opts = {}) {
   const li = document.createElement("li");
   const b = document.createElement("button");
-  b.className = "row t-" + (entry.tier || "plain");
+  const tier = entry.tier || "plain";
   b.type = "button";
-  b.innerHTML =
-    '<span class="nm"></span><span class="chip"></span><span class="ago"></span>';
+  b.className = "line t-" + tier +
+    (tier === "legendary" ? " slab" : tier === "epic" ? " slab epic" : "") +
+    (opts.arrive ? " arrive" : "");
+  b.innerHTML = '<span class="mark"></span><span class="nm"></span>' +
+                '<span class="tag"></span><span class="when"></span>';
+  b.querySelector(".mark").textContent =
+    tier === "legendary" || tier === "epic" ? "✦" : "·";
   b.querySelector(".nm").textContent = entry.name;
-  b.querySelector(".chip").textContent = entry.tier || "plain";
-  b.querySelector(".ago").textContent = ago(entry.found);
-  b.addEventListener("click", async () => {
-    const chip = b.querySelector(".chip");
-    const was = chip.textContent;
-    try {
-      await navigator.clipboard.writeText(entry.name);
-      chip.textContent = "copied";
-    } catch {
-      chip.textContent = "copy failed";
-    }
-    chip.classList.add("copied");
-    setTimeout(() => {
-      chip.textContent = was;
-      chip.classList.remove("copied");
-    }, 1400);
-  });
+  const tag = b.querySelector(".tag");
+  if (TIER_ORDER.indexOf(tier) <= TIER_ORDER.indexOf("rare")) {
+    tag.textContent = tier;
+  } else if (opts.bare) {
+    tag.remove();
+  } else {
+    tag.className = "tag len";
+    tag.textContent = (entry.len || String(entry.name).length) + "-char";
+  }
+  b.querySelector(".when").textContent = ago(entry.found);
+  b.addEventListener("click", () => copy(entry.name, b.querySelector(".when")));
   li.appendChild(b);
   return li;
 }
 
-function emptyEl(len, checked) {
-  const d = document.createElement("div");
-  d.className = "empty";
-  const pct = checked ? (checked / SPACE[len]) * 100 : 0;
-  d.innerHTML =
-    '<span class="big">0</span><p>Nothing here has ever been free.<br>' +
-    checked.toLocaleString() + " screened" +
-    (pct >= 0.1 ? " — " + pct.toFixed(1) + "% of every " + len +
-      "-character name" : "") + ".</p>";
-  return d;
+// ── the feed ────────────────────────────────────────────────────
+// Everything the hunter has found, newest and rarest first. On first paint
+// the rows are revealed one at a time so the page arrives the way the
+// desktop tool does - a feed filling in, not a table appearing. It is a
+// replay of recorded finds, and the header says so rather than implying the
+// page is checking Roblox itself.
+let known = new Set();
+let firstPaint = true;
+
+function allFinds(data) {
+  const out = [];
+  for (const len of LENGTHS) {
+    for (const e of (data.lengths && data.lengths[len]) || []) {
+      out.push({ ...e, len });
+    }
+  }
+  out.sort((a, b) => {
+    const t = TIER_ORDER.indexOf(a.tier || "plain") -
+              TIER_ORDER.indexOf(b.tier || "plain");
+    return t !== 0 ? t : String(b.found).localeCompare(String(a.found));
+  });
+  return out;
 }
 
+function renderFeed(data) {
+  const host = document.getElementById("stream");
+  const finds = allFinds(data);
+  document.getElementById("feedNote").textContent =
+    finds.length ? finds.length + " on the board" : "";
+  document.getElementById("streamFoot").textContent = finds.length
+    ? "Replaying the latest finds. The hunter checks Roblox every 15 minutes; " +
+      "new names drop in at the top."
+    : "Nothing found yet. The next hunt runs within 15 minutes.";
+
+  if (firstPaint) {
+    firstPaint = false;
+    host.textContent = "";
+    finds.forEach((e) => known.add(e.name));
+    let i = 0;
+    const step = () => {
+      if (i >= finds.length) return;
+      host.appendChild(lineEl(finds[i], { arrive: true }));
+      i++;
+      // Fast enough not to be a wait, slow enough to read as a stream.
+      setTimeout(step, i < 12 ? 55 : 22);
+    };
+    step();
+    return;
+  }
+
+  // Later refreshes only prepend what is genuinely new, so a name already on
+  // screen does not re-animate and pretend to be a fresh find.
+  const fresh = finds.filter((e) => !known.has(e.name));
+  fresh.reverse().forEach((e) => {
+    known.add(e.name);
+    host.prepend(lineEl(e, { arrive: true }));
+  });
+  while (host.children.length > 240) host.lastElementChild.remove();
+}
+
+// ── counter, facts, countdown ───────────────────────────────────
+function renderHero(data) {
+  let found = 0, screened = 0;
+  for (const len of LENGTHS) {
+    const t = (data.totals && data.totals[len]) || {};
+    found += t.found || 0;
+    screened += t.checked || 0;
+  }
+  const c = document.getElementById("count");
+  c.textContent = bigNumber(found);
+  c.classList.toggle("zero", found === 0);
+  document.getElementById("countLabel").classList.toggle("zero", found === 0);
+
+  const facts = [
+    [screened.toLocaleString(), "screened"],
+    [(data.watching || 0).toLocaleString(), "on watchlist"],
+    [String((data.released || []).length), "released"],
+    [data.updated ? ago(data.updated) + " ago" : "—", "last hunt"],
+  ];
+  const host = document.getElementById("facts");
+  host.textContent = "";
+  for (const [v, k] of facts) {
+    const d = document.createElement("div");
+    d.className = "fact";
+    d.innerHTML = "<b></b><small></small>";
+    d.querySelector("b").textContent = v;
+    d.querySelector("small").textContent = k;
+    host.appendChild(d);
+  }
+  document.getElementById("foot").textContent =
+    screened.toLocaleString() + " names screened so far";
+}
+
+function tickCountdown() {
+  // The schedule fires on the quarter hour, so the wait is knowable without
+  // asking the server anything.
+  const now = new Date();
+  const mins = 14 - (now.getUTCMinutes() % 15);
+  const secs = 59 - now.getUTCSeconds();
+  document.getElementById("next").textContent =
+    `next hunt ~${mins}:${String(secs).padStart(2, "0")}`;
+}
+
+// ── released band ───────────────────────────────────────────────
 function renderReleased(data) {
   const host = document.getElementById("released");
   const freed = data.released || [];
   const watching = data.watching || 0;
-
-  // Hide the band entirely when nothing is being watched yet - an empty
-  // gold panel promises something the page cannot deliver.
-  if (!watching && !freed.length) {
-    host.hidden = true;
-    return;
-  }
+  if (!watching && !freed.length) { host.hidden = true; return; }
   host.hidden = false;
   host.textContent = "";
 
   const h = document.createElement("h2");
   h.textContent = "Just released";
-  const sub = document.createElement("p");
-  sub.className = "sub";
-  sub.textContent = freed.length
-    ? "Names somebody gave up. First one to the signup page gets it."
-    : "Nothing yet.";
-  host.append(h, sub);
+  const p = document.createElement("p");
+  host.append(h, p);
 
   if (freed.length) {
+    p.textContent = "Names somebody gave up. First one to the signup page gets it.";
     const ul = document.createElement("ul");
     ul.className = "freed";
     freed.forEach((e) => {
@@ -291,87 +419,92 @@ function renderReleased(data) {
       b.innerHTML = '<span class="nm"></span><span class="when"></span>';
       b.querySelector(".nm").textContent = e.name;
       b.querySelector(".when").textContent = ago(e.found);
-      b.addEventListener("click", async () => {
-        const w = b.querySelector(".when");
-        const was = w.textContent;
-        try {
-          await navigator.clipboard.writeText(e.name);
-          w.textContent = "copied";
-        } catch {
-          w.textContent = "copy failed";
-        }
-        setTimeout(() => { w.textContent = was; }, 1400);
-      });
+      b.addEventListener("click", () => copy(e.name, b.querySelector(".when")));
       li.appendChild(b);
       ul.appendChild(li);
     });
     host.appendChild(ul);
   } else {
-    const p = document.createElement("p");
-    p.className = "watching";
-    p.innerHTML = "Watching <b></b> names people would actually want — " +
-      "words, and anything that reads like a name. They are all taken right " +
-      "now. When somebody renames away from one, it lands here.";
-    p.querySelector("b").textContent = watching.toLocaleString();
-    host.appendChild(p);
+    p.textContent = `Watching ${watching.toLocaleString()} names anyone would ` +
+      `actually want — real words, and anything that reads like a name. Every ` +
+      `one is taken right now. When somebody renames away from one, it lands here.`;
   }
 }
 
-function render(data) {
-  renderReleased(data);
-  const boards = document.getElementById("boards");
-  boards.textContent = "";
-  let grand = 0;
-
+// ── columns ─────────────────────────────────────────────────────
+function renderBoards(data) {
+  const host = document.getElementById("boards");
+  host.textContent = "";
   for (const len of LENGTHS) {
     const entries = (data.lengths && data.lengths[len]) || [];
     const totals = (data.totals && data.totals[len]) || { checked: 0, found: 0 };
-    grand += totals.checked || 0;
-
     const board = document.createElement("section");
     board.className = "board";
     const head = document.createElement("div");
-    head.className = "board-head";
-    head.innerHTML = "<b></b><span class='n'></span>";
+    head.className = "bh";
+    head.innerHTML = "<b></b><span></span>";
     head.querySelector("b").textContent = len + " characters";
-    head.querySelector(".n").textContent =
+    head.querySelector("span").textContent =
       (totals.found || 0).toLocaleString() + " found";
     board.appendChild(head);
 
     if (entries.length) {
       const ul = document.createElement("ul");
       ul.className = "rows";
-      entries.forEach((e) => ul.appendChild(rowEl(e)));
+      entries.forEach((e) => ul.appendChild(lineEl(e, { bare: true })));
       board.appendChild(ul);
     } else {
-      board.appendChild(emptyEl(len, totals.checked || 0));
+      const d = document.createElement("div");
+      d.className = "empty";
+      const pct = totals.checked ? (totals.checked / SPACE[len]) * 100 : 0;
+      d.innerHTML = "<b>0</b>Nothing here has ever been free.<br>" +
+        (totals.checked || 0).toLocaleString() + " screened" +
+        (pct >= 0.1 ? " — " + pct.toFixed(1) + "% of them all" : "") + ".";
+      board.appendChild(d);
     }
-    boards.appendChild(board);
+    host.appendChild(board);
   }
-
-  document.getElementById("stamp").textContent =
-    data.updated ? "updated " + ago(data.updated) + " ago" : "no data yet";
-  document.getElementById("totals").textContent =
-    grand.toLocaleString() + " names screened so far";
 }
 
+// ── chat ────────────────────────────────────────────────────────
+function mountChat() {
+  const s = document.createElement("script");
+  s.src = "https://giscus.app/client.js";
+  s.crossOrigin = "anonymous";
+  s.async = true;
+  // Pinned dark: the page commits to one dark surface, so giscus's
+  // preferred_color_scheme would drop a white box into the middle of it.
+  Object.assign(s.dataset, {
+    repo: GISCUS.repo, repoId: GISCUS.repoId,
+    category: GISCUS.category, categoryId: GISCUS.categoryId,
+    mapping: "pathname", strict: "0", reactionsEnabled: "1",
+    emitMetadata: "0", inputPosition: "top", theme: "dark_dimmed", lang: "en",
+  });
+  document.getElementById("chat").appendChild(s);
+}
+
+// ── load ────────────────────────────────────────────────────────
 async function load() {
   try {
-    // Pages caches aggressively and this file changes every few minutes.
     const r = await fetch("hits.json?t=" + Date.now(), { cache: "no-store" });
     if (!r.ok) throw new Error(r.status);
-    render(await r.json());
-  } catch (err) {
+    const data = await r.json();
+    document.getElementById("stamp").textContent =
+      data.updated ? "updated " + ago(data.updated) + " ago" : "no data yet";
+    renderHero(data);
+    renderReleased(data);
+    renderFeed(data);
+    renderBoards(data);
+  } catch {
     document.getElementById("stamp").textContent = "feed unavailable";
-    document.getElementById("dot").style.background = "var(--dead)";
-    if (!document.getElementById("boards").children.length) {
-      render({ lengths: {}, totals: {} });
-    }
+    document.getElementById("dot").style.background = "var(--red)";
   }
 }
 
 load();
 setInterval(load, 30000);
+tickCountdown();
+setInterval(tickCountdown, 1000);
 mountChat();
 </script>
 </body>
