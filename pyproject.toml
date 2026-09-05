@@ -1,0 +1,49 @@
+[project]
+name = "rovalid"
+version = "1.0.0"
+description = "Two-stage async Roblox username availability checker"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "GPL-3.0-or-later" }
+dependencies = ["aiohttp>=3.9", "rich>=13.0"]
+
+[project.urls]
+Homepage = "https://github.com/rostikcermak-pixel/RoValid"
+Board = "https://rostikcermak-pixel.github.io/RoValid/"
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+# Deliberately narrow for a first pass: correctness (F), syntax (E4/E7/E9),
+# whitespace (W), import hygiene (I), modern syntax (UP), and the async
+# footguns this codebase is entirely built out of (ASYNC). Style rules that
+# would rewrite working code are left off on purpose - see the ignore list
+# below for what is deferred rather than approved.
+select = ["E4", "E7", "E9", "F", "W", "I", "UP", "ASYNC", "B"]
+ignore = [
+    # Both are real, both are small, both are deferred rather than dismissed:
+    # ASYNC230 is checker.py appending to results/hits.txt from the event loop
+    # (one short write per hit), ASYNC240 is the wizard writing proxy files
+    # while nothing else is in flight.
+    "ASYNC230",
+    "ASYNC240",
+    # Misfires here: both `timeout` parameters are handed straight to
+    # aiohttp.ClientTimeout, which is the argument's whole purpose.
+    "ASYNC109",
+]
+
+[tool.ruff.lint.per-file-ignores]
+# checker.py patches asyncio.sslproto and asyncio.proactor_events before the
+# rest of the imports run; the patches have to land first, so E402 here is
+# structural rather than sloppy.
+"checker.py" = ["E402"]
+
+[tool.ruff.lint.isort]
+combine-as-imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+asyncio_mode = "auto"

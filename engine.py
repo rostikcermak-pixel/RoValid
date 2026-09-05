@@ -257,7 +257,7 @@ class RobloxChecker:
         circuit_breaker: CircuitBreaker | None = None,
         stats=None,
         max_inflight: int = 0,
-        cooldown: "SharedCooldown | None" = None,
+        cooldown: SharedCooldown | None = None,
     ) -> None:
         self.pm = proxy_manager
         self.timeout = timeout
@@ -499,7 +499,7 @@ class RobloxChecker:
                                 self.pm.score_miss(proxy)
                             backoff = 0.5
 
-            except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+            except (TimeoutError, aiohttp.ClientError, OSError) as exc:
                 dbg(f"  [batch {attempt}] {type(exc).__name__}")
                 await self._on_conn_error(proxy, attempt)
                 continue
@@ -608,7 +608,7 @@ class RobloxChecker:
                                 self.pm.score_miss(proxy)
                             backoff = 0.5
 
-            except (aiohttp.ClientError, asyncio.TimeoutError, OSError) as exc:
+            except (TimeoutError, aiohttp.ClientError, OSError) as exc:
                 dbg(f"  [{attempt}] {username} -> {type(exc).__name__}")
                 await self._on_conn_error(proxy, attempt)
                 continue
@@ -662,7 +662,7 @@ class WebhookSender:
         while True:
             try:
                 username = await asyncio.wait_for(self._queue.get(), timeout=1.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 async with self._buffer_lock:
                     if self._buffer and time.time() - last_flush >= self.FLUSH_INTERVAL:
                         await self._flush_locked()

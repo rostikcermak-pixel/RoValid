@@ -371,7 +371,7 @@ def _step_speed(proxies: list[str], scraped: bool = False) -> tuple[int, int, bo
     """Returns (concurrency, timeout, two_stage)."""
 
     two_stage = Confirm.ask(
-        f"Use fast 2-stage mode? [dim](200 names/request screen, then confirm)[/]",
+        "Use fast 2-stage mode? [dim](200 names/request screen, then confirm)[/]",
         default=True,
     )
     if not two_stage:

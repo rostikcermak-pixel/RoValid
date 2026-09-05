@@ -133,7 +133,7 @@ class ProxyManager:
         # corpse and resting it just brings it back to fail again.
         self._ever_worked: set[str] = set()
         if scored:
-            for raw, key in zip(self._proxies, self._formatted):
+            for raw, key in zip(self._proxies, self._formatted, strict=True):
                 if raw and raw.strip():
                     self._scores[key or raw.strip()] = 1
 

@@ -77,11 +77,10 @@ from config import (
 )
 from engine import (
     AVAILABLE,
-    ERROR,
-    MALFORMED_CHUNK,
     CENSORED,
-    EXHAUSTED,
+    ERROR,
     INVALID,
+    MALFORMED_CHUNK,
     TAKEN,
     CircuitBreaker,
     RobloxChecker,
@@ -92,7 +91,6 @@ from engine import (
 from proxy import ProxyManager
 from ui import C, banner, console, final_summary, live_card
 from wizard import generate_usernames, setup_wizard
-
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -240,7 +238,7 @@ async def _diag_sampler(stats: Stats, pm, stop_event: asyncio.Event,
         while not stop_event.is_set():
             try:
                 await asyncio.wait_for(stop_event.wait(), DIAG_INTERVAL)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
             now = {f: getattr(stats, f) for f in prev}
             delta = {f: now[f] - prev[f] for f in prev}
@@ -286,7 +284,7 @@ async def _run_checker(
     round_no: int = 1,
     cooldown=None,
     already_checked: set[str] | None = None,
-    stop: "_StopRequest | None" = None,
+    stop: _StopRequest | None = None,
 ) -> int:
     """Two-stage checker with a live display. Returns the hit count.
 
@@ -746,7 +744,7 @@ async def _run_checker(
             # decaying run - the part worth seeing - is not the part missing.
             try:
                 await asyncio.wait_for(diag_task, timeout=2.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+            except (TimeoutError, asyncio.CancelledError, Exception):
                 diag_task.cancel()
         if webhook:
             try:

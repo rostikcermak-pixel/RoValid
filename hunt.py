@@ -18,17 +18,17 @@ import random
 import string
 import sys
 import time
-from datetime import datetime, timezone
+from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Callable
 
 import aiohttp
 
+import watchlist
 from config import BATCH_MAX, Stats, is_valid_username
 from engine import AVAILABLE, MALFORMED_CHUNK, RobloxChecker, SharedCooldown
 from proxy import ProxyManager
 from rarity import rate
-import watchlist
 
 # The live file the page reads. It belongs to the scheduled run, which is
 # the only thing that should ever write it: a local test run holds a stale
@@ -234,7 +234,7 @@ async def main() -> int:
     last_write = 0.0
 
     def stamp() -> str:
-        return datetime.now(timezone.utc).isoformat(timespec="seconds")
+        return datetime.now(UTC).isoformat(timespec="seconds")
 
     def publish(force: bool = False) -> None:
         """Write the board out mid-run.
@@ -334,7 +334,7 @@ async def main() -> int:
         hard_cap = args.minutes * 60 * 1.6
         try:
             await asyncio.wait_for(work(session), timeout=hard_cap)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             print(f"  (hit the {hard_cap:.0f}s hard stop - saving what we have)",
                   flush=True)
 
