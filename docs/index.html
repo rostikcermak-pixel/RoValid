@@ -72,14 +72,14 @@ h1 span{color:var(--accent)}
 .streamhead h2{margin:0;font-size:11.5px;font-weight:600;letter-spacing:.16em;
   text-transform:uppercase;color:var(--ink-dim)}
 .streamhead .note{margin-left:auto;font-size:11px;color:var(--muted)}
-.stream{margin:0;padding:8px 0;list-style:none;height:420px;
-  overflow-y:auto;scrollbar-width:thin}
-/* A fixed height cuts whatever row happens to straddle the edge. Fading the
-   last few pixels turns that slice into an obvious "keep scrolling" instead
-   of a half-drawn row that looks broken. */
-.stream,.rows{mask-image:linear-gradient(180deg,#000 calc(100% - 26px),transparent);
-  -webkit-mask-image:linear-gradient(180deg,#000 calc(100% - 26px),transparent)}
-.stream:not(:hover),.rows:not(:hover){scrollbar-color:var(--line) transparent}
+/* The feed and the columns used to be their own scroll boxes - 420px and
+   330px - with a mask fading the last rows out. Both were mistakes on a
+   phone. A scroller inside a scrolling page fights the drag for the gesture,
+   so the thing simply would not move under a thumb, and a mask-image on an
+   overflow container breaks touch scrolling outright on iOS WebKit. The board
+   is short now that only noteworthy names reach it, so both just flow and the
+   page does the one scroll. */
+.stream{margin:0;padding:8px 0;list-style:none}
 .stream li{padding:0 6px}
 .line{display:flex;align-items:center;gap:11px;padding:6px 11px;
   border-radius:5px;width:100%;border:0;background:transparent;color:inherit;
@@ -144,7 +144,7 @@ h1 span{color:var(--accent)}
 .bh b{font-family:Archivo,sans-serif;font-size:14px;font-weight:600}
 .bh span{margin-left:auto;font-size:11px;color:var(--muted);
   font-variant-numeric:tabular-nums}
-.rows{list-style:none;margin:0;padding:5px;max-height:330px;overflow-y:auto}
+.rows{list-style:none;margin:0;padding:5px}
 .empty{padding:26px 16px;text-align:center;color:var(--muted);font-size:12px}
 .empty b{display:block;font-size:26px;color:var(--dead);margin-bottom:7px}
 
@@ -218,6 +218,9 @@ const GISCUS = {
 };
 
 const LENGTHS = ["3", "4", "5"];
+// Mirrors hunt.py's KEEP_ALL_LENGTHS: these two put every find on the board,
+// because a find at either is an event. Length 5 is filtered.
+const KEEP_ALL = new Set(["3", "4"]);
 const SPACE = { "3": 46656, "4": 1679616, "5": 60466176 };
 const TIER_ORDER = ["legendary", "epic", "rare", "solid", "plain", "junk"];
 const LIVE_WINDOW = 240;   // seconds since the last write to still call it live
@@ -316,20 +319,29 @@ function allFinds(data) {
   return out;
 }
 
+function totalFound(data) {
+  let found = 0;
+  for (const len of LENGTHS) found += ((data.totals || {})[len] || {}).found || 0;
+  return found;
+}
+
 function renderFeed(data) {
   const host = document.getElementById("stream");
   const finds = allFinds(data);
+  const found = totalFound(data);
   document.getElementById("feedNote").textContent =
     finds.length ? finds.length + " on the board" : "";
   document.getElementById("streamFoot").textContent = finds.length
-    ? "Replaying the latest finds. The hunter checks Roblox every 15 minutes; " +
-      "new names drop in at the top."
-    : "Nothing found yet. The next hunt runs within 15 minutes.";
+    ? "Every 3- and 4-character name that comes free is here. At 5 characters " +
+      "only names worth typing are - a real word, at most one digit - out of " +
+      found.toLocaleString() + " found in total."
+    : "Nothing on the board yet. Names appear here when a hunt finds one worth " +
+      "showing.";
 
   if (firstPaint) {
     firstPaint = false;
     host.textContent = "";
-    finds.forEach((e) => known.add(e.name));
+    known = new Set(finds.map((e) => e.name));
     let i = 0;
     const step = () => {
       if (i >= finds.length) return;
@@ -342,14 +354,19 @@ function renderFeed(data) {
     return;
   }
 
-  // Later refreshes only prepend what is genuinely new, so a name already on
-  // screen does not re-animate and pretend to be a fresh find.
-  const fresh = finds.filter((e) => !known.has(e.name));
-  fresh.reverse().forEach((e) => {
-    known.add(e.name);
-    host.prepend(lineEl(e, { arrive: true }));
-  });
-  while (host.children.length > 240) host.lastElementChild.remove();
+  // Rebuilt from the data every time rather than patched. Refreshes used to
+  // prepend new names straight to the top, which put a junk name above a
+  // legendary one and left it there; and nothing ever removed a row whose
+  // name had rotated out of hits.json, so the feed slowly filled with names
+  // that were no longer on the board at all. Rebuilding fixes both, and only
+  // names that were not here last time animate in.
+  const previous = known;
+  known = new Set(finds.map((e) => e.name));
+  const frag = document.createDocumentFragment();
+  finds.forEach((e) => frag.appendChild(
+    lineEl(e, { arrive: !previous.has(e.name) })));
+  host.textContent = "";
+  host.appendChild(frag);
 }
 
 // ── counter, facts, countdown ───────────────────────────────────
@@ -469,9 +486,14 @@ function renderBoards(data) {
     const head = document.createElement("div");
     head.className = "bh";
     head.innerHTML = "<b></b><span></span>";
+    const found = totals.found || 0;
     head.querySelector("b").textContent = len + " characters";
-    head.querySelector("span").textContent =
-      (totals.found || 0).toLocaleString() + " found";
+    // At 3 and 4 every free name is on the board, so one number says it all.
+    // At 5 the board is filtered, and printing the raw find count next to a
+    // much shorter list is exactly what made the page look broken.
+    head.querySelector("span").textContent = KEEP_ALL.has(len)
+      ? found.toLocaleString() + " found"
+      : entries.length + " of " + found.toLocaleString();
     board.appendChild(head);
 
     if (entries.length) {
@@ -483,9 +505,15 @@ function renderBoards(data) {
       const d = document.createElement("div");
       d.className = "empty";
       const pct = totals.checked ? (totals.checked / SPACE[len]) * 100 : 0;
-      d.innerHTML = "<b>0</b>Nothing here has ever been free.<br>" +
-        (totals.checked || 0).toLocaleString() + " screened" +
-        (pct >= 0.1 ? " — " + pct.toFixed(1) + "% of them all" : "") + ".";
+      // Two different emptinesses. At 3 and 4 nothing has ever come free at
+      // all. At 5 thousands have - none of them yet worth putting up. Saying
+      // "never been free" there would be a plain lie.
+      d.innerHTML = found
+        ? "<b>—</b>" + found.toLocaleString() + " came free, none worth " +
+          "showing yet.<br>Real words and near-misses land here."
+        : "<b>0</b>Nothing here has ever been free.<br>" +
+          (totals.checked || 0).toLocaleString() + " screened" +
+          (pct >= 0.1 ? " — " + pct.toFixed(1) + "% of them all" : "") + ".";
       board.appendChild(d);
     }
     host.appendChild(board);

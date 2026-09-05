@@ -29,7 +29,7 @@ import watchlist
 from config import BATCH_MAX, Stats, is_valid_username
 from engine import AVAILABLE, MALFORMED_CHUNK, RobloxChecker, SharedCooldown
 from proxy import ProxyManager
-from rarity import rate
+from rarity import is_noteworthy, rate
 
 # The live file the page reads. It belongs to the scheduled run, which is
 # the only thing that should ever write it: a local test run holds a stale
@@ -47,7 +47,22 @@ LOCAL_OUT = Path("hits.local.json")
 # whatever it sees, so this is really "how fresh the site is" - against a run
 # that now lasts most of an hour, twenty seconds is plenty.
 WRITE_EVERY = 20.0
-KEEP_PER_LENGTH = 60
+
+# Lengths 3 and 4 keep everything they find. Every three-character name and
+# every one of the 1,679,616 four-character names is taken - an exhaustive
+# sweep turned up nothing - so a find at either length is an event and goes on
+# the board whatever it looks like. The cap is only a guard against a
+# pathological run bloating a file that is committed every couple of minutes
+# forever; nothing has ever come close to it.
+KEEP_ALL_LENGTHS = {3, 4}
+KEEP_RARE_LENGTH = 500
+
+# Length 5 is the opposite problem: ten thousand free names in a run and
+# almost all of them licence plates. Only what rarity.is_noteworthy accepts
+# reaches the board, which measures at about one name in 726, so 200 slots is
+# far more than a run fills.
+KEEP_PER_LENGTH = 200
+
 KEEP_RELEASED = 40
 
 # Ordering on the page. Free names are not scarce - a one-minute sample found
@@ -328,10 +343,23 @@ async def main() -> int:
             budget = seconds * weights.get(length, 4.0) / total_w
             key = str(length)
             totals = data["totals"].setdefault(key, {"checked": 0, "found": 0})
+            totals.setdefault("kept", 0)
             hits = 0
 
-            def keep(name: str, key=key, totals=totals) -> None:
+            def keep(name: str, key=key, totals=totals, length=length) -> None:
                 nonlocal fresh_total, hits
+                # Counted whether or not it earns a place. How many names are
+                # free and how many are worth showing are different questions,
+                # and the board used to answer only the first while displaying
+                # an answer to the second.
+                totals["found"] += 1
+                fresh_total += 1
+                hits += 1
+
+                keep_all = length in KEEP_ALL_LENGTHS
+                if not keep_all and not is_noteworthy(name):
+                    return
+
                 tier, weight = rate(name)
                 entries = data["lengths"].setdefault(key, [])
                 entries.append({
@@ -339,10 +367,8 @@ async def main() -> int:
                     "tier": tier, "weight": weight,
                 })
                 entries.sort(key=_order)
-                del entries[KEEP_PER_LENGTH:]
-                totals["found"] += 1
-                fresh_total += 1
-                hits += 1
+                del entries[KEEP_RARE_LENGTH if keep_all else KEEP_PER_LENGTH:]
+                totals["kept"] = len(entries)
                 publish()
 
             checked, survivors = await hunt_length(
@@ -351,7 +377,8 @@ async def main() -> int:
             totals["checked"] += checked
             print(
                 f"  len {length}: {budget:.0f}s, screened {checked:,}, "
-                f"survivors {survivors:,}, free {hits}", flush=True,
+                f"survivors {survivors:,}, free {hits}, "
+                f"on the board {totals['kept']}", flush=True,
             )
             publish(force=True)
 

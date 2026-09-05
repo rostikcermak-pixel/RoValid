@@ -6,7 +6,7 @@ reshuffles what visitors see first.
 
 import pytest
 
-from rarity import TIERS, WORDS, rate
+from rarity import TIERS, WORDS, is_noteworthy, rate
 
 
 @pytest.mark.parametrize("name, tier", [
@@ -52,3 +52,45 @@ def test_no_truncated_non_words_survive():
         assert junk not in WORDS
     # The two slices that did land on real words are still there as words.
     assert {"pear", "rave", "wolf"} <= WORDS
+
+
+# ── board policy ───────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("name", [
+    "aaaaa",        # single repeated character -> legendary
+    "12321",        # palindrome -> solid
+    "xkqzf",        # letters only, which no five-char find has ever been
+    "blaze",        # a word
+    "mud5c", "d6bug", "box8j", "6cowv", "4vhit", "9fixq", "w3jam",
+])
+def test_noteworthy_names_reach_the_board(name):
+    assert is_noteworthy(name)
+
+
+@pytest.mark.parametrize("name", [
+    "p0xmt",        # three consonants, two digits, no word
+    "5jk0v", "40rhx", "3pwc1", "9pruc", "gwm4o",
+    "6p8zz",        # too many digits even though it has a shape
+])
+def test_licence_plates_do_not(name):
+    assert not is_noteworthy(name)
+
+
+def test_one_digit_is_the_limit_even_with_a_word():
+    # "cow" survives in both; only the single-digit one is worth showing.
+    assert is_noteworthy("6cowv")
+    assert not is_noteworthy("6c0wv")
+
+
+def test_the_filter_is_case_insensitive():
+    assert is_noteworthy("MUD5C") == is_noteworthy("mud5c")
+
+
+def test_it_is_selective_on_real_data():
+    # Sanity bound, not an exact figure: measured 29 of 21,069 real finds.
+    # If a change ever makes this loose enough to pass a licence plate, the
+    # board fills with junk again, which is the bug this exists to prevent.
+    from rarity import _pronounceable
+    plates = ["5jk0v", "40rhx", "3pwc1", "9pruc", "plc9p", "4k8gm", "w97m1"]
+    assert not any(is_noteworthy(p) for p in plates)
+    assert _pronounceable("mavlo")

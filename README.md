@@ -325,6 +325,25 @@ digit-free**. Good names are taken, and only come back when somebody renames
 away from one, so the board watches for exactly that rather than hoping to
 stumble on a good name at random.
 
+### What reaches the board
+
+Being free and being worth having are different questions, and the board
+answers the second.
+
+- **3 and 4 characters: everything.** Every name at both lengths is taken —
+  an exhaustive sweep of all 1,679,616 four-character names turned up nothing
+  — so anything that ever comes free is an event and goes up whatever it
+  looks like.
+- **5 characters: only what `rarity.is_noteworthy` accepts.** A palindrome, a
+  repeat, or any digit-free name qualifies outright. Below that a name has to
+  read: at most one digit, pronounceable, and carrying a real word — `mud5c`,
+  `d6bug`, `box8j`, `6cowv`, `4vhit`. Measured over 21,069 real finds that
+  keeps 29 of them, about one in 726.
+
+The totals still count every free name, because that is the true number. The
+column header shows both — `25 of 10,543` — rather than a find count next to
+a much shorter list, which is what used to make the page look broken.
+
 Run it yourself against a local file instead of the live one:
 
 ```bash

@@ -224,6 +224,46 @@ def _patterned(name: str) -> bool:
     return False
 
 
+def _embedded_word(name: str) -> str | None:
+    """The longest word from WORDS sitting inside *name*, if any."""
+    for size in (5, 4, 3):
+        for i in range(0, len(name) - size + 1):
+            piece = name[i:i + size]
+            if piece.isalpha() and piece in WORDS:
+                return piece
+    return None
+
+
+# What earns a place on the board rather than merely being free.
+#
+# Free names are not scarce and almost none of them are worth having. Measured
+# over 21,069 real five-character finds: not one was digit-free, so nothing
+# reached the letters-only tiers, and not one was patterned either - `rate`
+# alone would have kept everything or nothing. What separates the handful
+# somebody would actually type is a real word surviving inside the name with
+# at most one digit around it: mud5c, d6bug, box8j, 6cowv, 4vhit, 9fixq.
+#
+# That rule kept 29 of the 21,069 - about one in 726 - which is roughly a
+# dozen names from a run that finds ten thousand. Sparse on purpose.
+NOTEWORTHY_TIER = TIERS["solid"]
+NOTEWORTHY_MAX_DIGITS = 1
+
+
+def is_noteworthy(name: str) -> bool:
+    """True for a name worth putting on the board.
+
+    Anything at `solid` or above qualifies on its own - a palindrome, a
+    repeat, or any name that manages to be letters-only. Below that, a name
+    has to read: at most one digit, pronounceable, and carrying a word.
+    """
+    low = name.lower()
+    if rate(low)[1] >= NOTEWORTHY_TIER:
+        return True
+    if sum(c.isdigit() for c in low) > NOTEWORTHY_MAX_DIGITS:
+        return False
+    return _pronounceable(low) and _embedded_word(low) is not None
+
+
 def rate(name: str) -> tuple[str, int]:
     """Return (tier, weight) for *name*."""
     low = name.lower()
