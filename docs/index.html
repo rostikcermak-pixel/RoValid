@@ -81,6 +81,31 @@ h1 span{color:var(--accent)}
    page does the one scroll. */
 .stream{margin:0;padding:8px 0;list-style:none}
 .stream li{padding:0 6px}
+/* Swipe a name you do not want and the next one out of the reserve takes its
+   place. pan-y is the load-bearing bit: it hands vertical drags back to the
+   page so the list still scrolls under a thumb, and keeps only the sideways
+   ones. */
+.stream li,.rows li{position:relative;touch-action:pan-y;
+  transition:transform .19s ease,opacity .19s ease}
+.stream li.dragging,.rows li.dragging{transition:none}
+/* The row is a button already, so the drop control sits beside it and only
+   surfaces on hover or keyboard focus - a permanent x on every row would
+   compete with the name for attention. */
+.drop{position:absolute;top:50%;right:8px;transform:translateY(-50%);
+  width:22px;height:22px;padding:0;border-radius:5px;cursor:pointer;
+  border:1px solid var(--line);background:var(--panel-2);color:var(--muted);
+  font:inherit;font-size:13px;line-height:1;opacity:0}
+li:hover .drop,.drop:focus-visible{opacity:1}
+.drop:hover,.drop:focus-visible{color:var(--ink);border-color:var(--dead);outline:none}
+@media (hover:none){.drop{display:none}}   /* touch has the swipe instead */
+.hiddenbar{display:flex;align-items:center;gap:10px;margin-top:9px;
+  font-size:11px;color:var(--muted)}
+/* display:flex on a class outranks the UA's [hidden]{display:none}, so the
+   attribute alone does not hide this. Every other hidden element on the page
+   sets no display of its own, which is why only this one needs saying. */
+.hiddenbar[hidden]{display:none}
+.restore{font:inherit;font-size:11px;cursor:pointer;color:var(--accent);
+  background:transparent;border:0;padding:0;text-decoration:underline}
 .line{display:flex;align-items:center;gap:11px;padding:6px 11px;
   border-radius:5px;width:100%;border:0;background:transparent;color:inherit;
   font:inherit;text-align:left;cursor:pointer}
@@ -189,6 +214,7 @@ a{color:var(--accent)}
   <ul class="stream" id="stream"></ul>
   <div class="streamfoot" id="streamFoot"></div>
 </section>
+<div class="hiddenbar" id="hiddenBar" hidden></div>
 
 <section class="released" id="released" hidden></section>
 
@@ -218,6 +244,13 @@ const GISCUS = {
 };
 
 const LENGTHS = ["3", "4", "5"];
+// How many five-character names are on show at once. The rest of what the
+// hunter kept stays in reserve: swipe one away and the next best slides up.
+// Lengths 3 and 4 are never windowed - a find there is rare enough that all
+// of them belong on screen.
+const BOARD_WINDOW = 12;
+const SWIPE_TRIGGER = 90;              // px before a drag counts as a swipe
+const DISMISS_KEY = "rovalid.dismissed.v1";
 // Mirrors hunt.py's KEEP_ALL_LENGTHS: these two put every find on the board,
 // because a find at either is an event. Length 5 is filtered.
 const KEEP_ALL = new Set(["3", "4"]);
@@ -267,6 +300,100 @@ async function copy(name, el) {
   setTimeout(() => { el.textContent = was; }, 1400);
 }
 
+// Kept in the browser, not in hits.json: which names you have swiped away is
+// your opinion, not something the hunter found. Every access is guarded -
+// private windows throw on localStorage rather than returning null, and a
+// page that cannot remember dismissals should still work for the session.
+function loadDismissed() {
+  try { return new Set(JSON.parse(localStorage.getItem(DISMISS_KEY) || "[]")); }
+  catch { return new Set(); }
+}
+
+function saveDismissed() {
+  try { localStorage.setItem(DISMISS_KEY, JSON.stringify([...dismissed])); }
+  catch { /* no storage: the dismissals last as long as the tab does */ }
+}
+
+let dismissed = loadDismissed();
+let lastData = null;
+
+function dismiss(name) {
+  dismissed.add(name);
+  saveDismissed();
+  if (lastData) { renderFeed(lastData); renderBoards(lastData); }
+  renderHiddenBar();
+}
+
+function restoreAll() {
+  dismissed = new Set();
+  saveDismissed();
+  if (lastData) { renderFeed(lastData); renderBoards(lastData); }
+  renderHiddenBar();
+}
+
+function renderHiddenBar() {
+  const host = document.getElementById("hiddenBar");
+  const n = dismissed.size;
+  if (!n) { host.hidden = true; return; }
+  host.hidden = false;
+  host.textContent = "";
+  const label = document.createElement("span");
+  label.textContent = n + (n === 1 ? " name hidden" : " names hidden");
+  const btn = document.createElement("button");
+  btn.type = "button";
+  btn.className = "restore";
+  btn.textContent = "bring them back";
+  btn.addEventListener("click", restoreAll);
+  host.append(label, btn);
+}
+
+// Drag a row sideways past SWIPE_TRIGGER and it leaves. Either direction
+// works - reaching across a phone to swipe one particular way is a chore,
+// and there is only one thing a swipe can mean here.
+function attachSwipe(li, name) {
+  let startX = 0, dx = 0, dragging = false;
+
+  li.addEventListener("pointerdown", (ev) => {
+    if (ev.button) return;
+    // The drop button is not a drag handle. Capturing the pointer on the row
+    // re-targets the click away from it, so starting a drag here swallowed
+    // the button press entirely.
+    if (ev.target.closest(".drop")) return;
+    dragging = true; startX = ev.clientX; dx = 0;
+    li.classList.add("dragging");
+    try { li.setPointerCapture(ev.pointerId); } catch { /* not captureable */ }
+  });
+
+  li.addEventListener("pointermove", (ev) => {
+    if (!dragging) return;
+    dx = ev.clientX - startX;
+    li.style.transform = "translateX(" + dx + "px)";
+    li.style.opacity = String(Math.max(0.15, 1 - Math.abs(dx) / 260));
+  });
+
+  const settle = (ev) => {
+    if (!dragging) return;
+    dragging = false;
+    li.classList.remove("dragging");
+    try { li.releasePointerCapture(ev.pointerId); } catch { /* already gone */ }
+    if (Math.abs(dx) >= SWIPE_TRIGGER) {
+      li.style.transform = "translateX(" + (dx > 0 ? 420 : -420) + "px)";
+      li.style.opacity = "0";
+      setTimeout(() => dismiss(name), 190);
+      return;
+    }
+    li.style.transform = "";
+    li.style.opacity = "";
+  };
+  li.addEventListener("pointerup", settle);
+  li.addEventListener("pointercancel", settle);
+
+  // A swipe must not also copy the name on the way out.
+  li.addEventListener("click", (ev) => {
+    if (Math.abs(dx) > 6) { ev.stopPropagation(); ev.preventDefault(); }
+  }, true);
+}
+
 function lineEl(entry, opts = {}) {
   const li = document.createElement("li");
   const b = document.createElement("button");
@@ -292,6 +419,18 @@ function lineEl(entry, opts = {}) {
   b.querySelector(".when").textContent = ago(entry.found);
   b.addEventListener("click", () => copy(entry.name, b.querySelector(".when")));
   li.appendChild(b);
+
+  // The swipe is for thumbs; this is the same action for a mouse or a
+  // keyboard, which have no gesture to make.
+  const drop = document.createElement("button");
+  drop.type = "button";
+  drop.className = "drop";
+  drop.textContent = "×";
+  drop.setAttribute("aria-label", "Hide " + entry.name);
+  drop.addEventListener("click", (ev) => { ev.stopPropagation(); dismiss(entry.name); });
+  li.appendChild(drop);
+
+  attachSwipe(li, entry.name);
   return li;
 }
 
@@ -325,18 +464,28 @@ function totalFound(data) {
   return found;
 }
 
+function visible(entries) {
+  return entries.filter((e) => !dismissed.has(e.name));
+}
+
 function renderFeed(data) {
   const host = document.getElementById("stream");
-  const finds = allFinds(data);
+  const all = visible(allFinds(data));
+  const finds = all.slice(0, BOARD_WINDOW);
   const found = totalFound(data);
-  document.getElementById("feedNote").textContent =
-    finds.length ? finds.length + " on the board" : "";
+  const reserve = all.length - finds.length;
+  document.getElementById("feedNote").textContent = finds.length
+    ? finds.length + " shown" + (reserve ? " · " + reserve + " in reserve" : "")
+    : "";
   document.getElementById("streamFoot").textContent = finds.length
-    ? "Every 3- and 4-character name that comes free is here. At 5 characters " +
-      "only names worth typing are - a real word, at most one digit - out of " +
+    ? "Swipe a name away and the next one takes its place. Every 3- and " +
+      "4-character name that comes free is here; at 5 characters only names " +
+      "worth typing are - a real word, at most one digit - out of " +
       found.toLocaleString() + " found in total."
-    : "Nothing on the board yet. Names appear here when a hunt finds one worth " +
-      "showing.";
+    : dismissed.size
+      ? "Everything on the board is hidden."
+      : "Nothing on the board yet. Names appear here when a hunt finds one " +
+        "worth showing.";
 
   if (firstPaint) {
     firstPaint = false;
@@ -479,7 +628,11 @@ function renderBoards(data) {
   const host = document.getElementById("boards");
   host.textContent = "";
   for (const len of LENGTHS) {
-    const entries = (data.lengths && data.lengths[len]) || [];
+    // 3 and 4 show everything they have - a find at either is rare enough
+    // that hiding any of it behind a reserve would be perverse. 5 is windowed.
+    const raw = (data.lengths && data.lengths[len]) || [];
+    const kept = visible(raw);
+    const entries = KEEP_ALL.has(len) ? kept : kept.slice(0, BOARD_WINDOW);
     const totals = (data.totals && data.totals[len]) || { checked: 0, found: 0 };
     const board = document.createElement("section");
     board.className = "board";
@@ -493,7 +646,9 @@ function renderBoards(data) {
     // much shorter list is exactly what made the page look broken.
     head.querySelector("span").textContent = KEEP_ALL.has(len)
       ? found.toLocaleString() + " found"
-      : entries.length + " of " + found.toLocaleString();
+      : entries.length + " of " + found.toLocaleString() +
+        (kept.length > entries.length
+          ? " · " + (kept.length - entries.length) + " more" : "");
     board.appendChild(head);
 
     if (entries.length) {
@@ -508,7 +663,13 @@ function renderBoards(data) {
       // Two different emptinesses. At 3 and 4 nothing has ever come free at
       // all. At 5 thousands have - none of them yet worth putting up. Saying
       // "never been free" there would be a plain lie.
-      d.innerHTML = found
+      // Emptied by swiping, not empty by nature - and the difference is per
+      // column. Testing dismissed.size globally made 3 and 4 claim their
+      // contents were hidden the moment a five-character name was swiped.
+      d.innerHTML = raw.length
+        ? "<b>—</b>Everything here is hidden.<br>Use " +
+          "&ldquo;bring them back&rdquo; under the feed."
+        : found
         ? "<b>—</b>" + found.toLocaleString() + " came free, none worth " +
           "showing yet.<br>Real words and near-misses land here."
         : "<b>0</b>Nothing here has ever been free.<br>" +
@@ -543,6 +704,7 @@ async function load() {
     const r = await fetch("hits.json?t=" + Date.now(), { cache: "no-store" });
     if (!r.ok) throw new Error(r.status);
     const data = await r.json();
+    lastData = data;
     lastUpdated = data.updated ? Date.parse(data.updated) : null;
     if (!lastUpdated) document.getElementById("stamp").textContent = "no data yet";
     tickStatus();
@@ -550,6 +712,7 @@ async function load() {
     renderReleased(data);
     renderFeed(data);
     renderBoards(data);
+    renderHiddenBar();
   } catch {
     lastUpdated = null;
     document.getElementById("stamp").textContent = "feed unavailable";

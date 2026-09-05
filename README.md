@@ -341,8 +341,21 @@ answers the second.
   keeps 29 of them, about one in 726.
 
 The totals still count every free name, because that is the true number. The
-column header shows both — `25 of 10,543` — rather than a find count next to
-a much shorter list, which is what used to make the page look broken.
+column header shows both — `12 of 10,543 · 11 more` — rather than a find count
+next to a much shorter list, which is what used to make the page look broken.
+
+### Swipe a name away
+
+Twelve five-character names are on show at a time; the rest of what the hunter
+kept stays in reserve. Swipe one sideways — either direction — and the next
+best slides up to take its place. On a mouse or a keyboard the same thing is a
+small `×` on the row.
+
+Dismissals are yours, not the board's: they live in your browser's
+`localStorage`, never in `hits.json`, so they survive a reload and affect
+nobody else. A count and a **bring them back** link sit under the feed. Lengths
+3 and 4 are never windowed — a find at either is rare enough that all of it
+belongs on screen.
 
 Run it yourself against a local file instead of the live one:
 
