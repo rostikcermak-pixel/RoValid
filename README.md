@@ -280,9 +280,19 @@ grinding tens of thousands of names.
 **If stage 2 has more than ~100 candidates, use proxies.** Each proxy carries
 its own rate-limit bucket, and that is the only thing that lifts this ceiling.
 
-A scraped pool is roughly 95% dead on arrival, so RoValid screens it against the
-real endpoint before the run starts — one short timeout per proxy, all at once —
-rather than discovering each corpse mid-run at the cost of a stalled worker.
+The scrape pulls from 27 public lists and returns roughly 166,000 unique
+proxies in about a second. Almost all of them are dead, so RoValid screens the
+pool against the real endpoint before the run starts — one short timeout per
+proxy, all at once — rather than discovering each corpse mid-run at the cost of
+a stalled worker.
+
+That screen is the slow part, not the scrape, so the pool is trimmed to 25,000
+first (`SCRAPE_POOL_CAP`) and the screen then takes a few minutes. The trim is
+not uniform: four of the sources are unchecked dumps that make up ~93% of the
+total, so sampling evenly would drown out the curated lists that publish only
+validated proxies. Every curated source is kept whole and the dumps fill
+whatever budget is left. Survivors are written to `data/proxies.txt`, so the
+next run can reuse them instead of screening again.
 
 Free proxies carry the usual caveat: an unknown operator sees that your IP connects
 to `roblox.com` and how often. They cannot see the names or the responses — traffic
