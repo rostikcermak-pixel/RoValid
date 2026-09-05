@@ -2,13 +2,19 @@
 
 **Roblox username availability checker.** Async, proxy-optional, two-stage.
 
-No token, no login, no account needed — both endpoints it uses are public and unauthenticated.
+[![ci](https://github.com/rostikcermak-pixel/RoValid/actions/workflows/ci.yml/badge.svg)](https://github.com/rostikcermak-pixel/RoValid/actions/workflows/ci.yml)
+[![hunt](https://github.com/rostikcermak-pixel/RoValid/actions/workflows/hunt.yml/badge.svg)](https://github.com/rostikcermak-pixel/RoValid/actions/workflows/hunt.yml)
+[![python](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
+[![license](https://img.shields.io/badge/license-GPL--3.0-blue.svg)](LICENSE)
+
+No token, no login, no account needed — both endpoints it uses are public and
+unauthenticated.
 
 ### 🔴 Live board — [rostikcermak-pixel.github.io/RoValid](https://rostikcermak-pixel.github.io/RoValid/)
 
-Names found free, updated every 15 minutes by a GitHub Action. Nothing to
-install and no PC left running: the hunt happens on GitHub, the page just
-reads what it committed. There is a chat under the board.
+Names found free, updated by a GitHub Action. Nothing to install and no PC left
+running: the hunt happens on GitHub, the page just reads what it committed.
+There is a chat under the board.
 
 > **Playing Minecraft instead?** There's a Minecraft version on the
 > [`minecraft`](https://github.com/rostikcermak-pixel/RoValid/tree/minecraft)
@@ -16,37 +22,108 @@ reads what it committed. There is a chat under the board.
 
 ---
 
-## The live board
+## Contents
 
-[**rostikcermak-pixel.github.io/RoValid**](https://rostikcermak-pixel.github.io/RoValid/)
-
-`.github/workflows/hunt.yml` runs `hunt.py` every 15 minutes on GitHub's own
-machines and commits anything it finds to `docs/hits.json`. GitHub Pages
-serves that file, so the board is live without a server, a database, or a
-machine of yours being switched on.
-
-Two passes run each time:
-
-| pass | what it does |
-|---|---|
-| **watchlist** | Re-checks 3,600 names people would actually want — real words, and shapes that read like names. All taken today; a release lands in the gold band at the top. |
-| **hunt** | Draws fresh random names at 3, 4 and 5 characters and screens them. |
-
-The watchlist is the interesting half. Free names are not scarce — a
-one-minute sample found 183 free five-character names and **not one was
-digit-free**. Good names are taken, and only come back when somebody renames
-away from one, so the board watches for exactly that rather than hoping to
-stumble on a good name at random.
-
-Run it yourself against a local file instead of the live one:
-
-```bash
-python hunt.py --minutes 5 --lengths 3,4,5     # writes hits.local.json
-```
+- [Quick start](#quick-start) · [Usage](#usage) · [Command-line flags](#command-line-flags) · [Output files](#output-files)
+- [How it works](#how-it-works) · [Why it's fast](#why-its-fast) · [Proxies](#do-you-need-proxies)
+- [The live board](#the-live-board) · [Configuration](#configuration) · [Roblox rules](#roblox-username-rules)
+- [Project layout](#project-layout) · [Development](#development) · [Troubleshooting](#troubleshooting)
 
 ---
 
-## Why it's fast
+## Quick start
+
+**Requirements:** Python 3.11 or newer. CI runs the suite on 3.11, 3.12 and 3.13.
+
+### macOS / Linux
+
+```bash
+git clone https://github.com/rostikcermak-pixel/RoValid.git
+cd RoValid
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+python checker.py
+```
+
+After the first setup, `./run.sh` launches it against that venv.
+
+### Windows
+
+Install Python from [python.org/downloads](https://python.org/downloads) —
+**tick "Add Python to PATH"** during install. Then, in PowerShell:
+
+```powershell
+git clone https://github.com/rostikcermak-pixel/RoValid.git
+cd RoValid
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+python checker.py
+```
+
+After the first setup, **double-click `run.bat`**.
+
+Use Windows Terminal or PowerShell rather than the old `cmd.exe` — the dashboard
+draws box characters that legacy consoles render poorly.
+
+---
+
+## Usage
+
+The wizard asks four things. Pressing Enter through all of them is a valid run:
+
+1. **Proxies** — choose `n` (none). You do not need them.
+2. **Usernames** — `g` to generate, pick a length, pick how many.
+3. **Speed** — accept the defaults.
+4. **Webhook** — `n` unless you want Discord notifications.
+
+When you generate names there is one extra question: **keep drawing new names
+until one is free?** Off by default. With it on, a round that finds nothing
+draws a fresh batch and goes again, stopping at the first hit or on Ctrl+C.
+Rounds share one rate-limit cooldown, so repeating costs no re-learning of the
+limit, and names an earlier round already checked are never re-checked.
+
+Each check prints above the live panel as it resolves — taken names dim out,
+hits show bright — with the stats staying pinned underneath. It renders at
+roughly 13,000 lines/sec (pre-built styles, batched output), so a proxyless run
+or a modest proxied one never notices it: the network is far slower than the
+rendering. It only becomes the bottleneck on a pool pushing past that, which is
+why `--no-stream` exists.
+
+**Ctrl+C stops cleanly.** It finishes what is in flight, prints the summary, and
+writes every name it never got an answer for to `results/unresolved.txt` so you
+can re-run just those. Press it a second time to quit immediately instead.
+
+### Command-line flags
+
+| Flag | Effect |
+|---|---|
+| `-n`, `--no-wizard` | Skip setup; reuse the saved config and `data/` files |
+| `-d`, `--debug` | Log every request and response, and stop filtering event-loop noise |
+| `--no-stream` | Don't print each check above the live panel |
+| `--diag` | Sample the run into `logs/diag.csv` every 5s (deltas per interval, plus proxy-pool state) |
+| `--version` | Print the version and exit |
+
+`--diag` is the one to reach for when a run decays instead of finishing: the
+column that grows as throughput falls is the cause.
+
+### Output files
+
+Written under `results/`, created on first run:
+
+- `results/hits.txt` — confirmed available, appended across runs, flushed the
+  moment each hit is found
+- `results/unresolved.txt` — names that could not be resolved (dead proxy,
+  exhausted retries, interrupted run), rewritten each run
+
+**Nothing gets silently dropped.** Feed `unresolved.txt` back in as your input
+file to retry exactly those. A name is never quietly reclassified as taken
+because a request failed.
+
+---
+
+## How it works
 
 A naive checker sends one request per username. Roblox's rate limiter allows only
 a couple of requests per IP before throttling, so that approach needs a large paid
@@ -63,6 +140,10 @@ falls back to per-name checks for the handful that survive:
 **Stage 2 is not optional.** Censored and reserved names have no account behind them,
 so stage 1 reports them as free when they are not. A batch-only checker gets these
 wrong. Stage 1 narrows the field; stage 2 is what makes the answer trustworthy.
+
+---
+
+## Why it's fast
 
 ### Measured, proxyless
 
@@ -83,7 +164,7 @@ survive stage 1:
 
 Stage 1 is cheap and scales beautifully. **Stage 2 is one request per surviving
 name and cannot be batched** — Roblox exposes no bulk validator. So the honest
-rule is: your runtime is roughly *(number of stage-2 candidates) x (your
+rule is: your runtime is roughly *(number of stage-2 candidates) × (your
 per-request rate)*, and everything stage 1 eliminates is nearly free.
 
 Proxyless, Roblox allows about three requests before throttling, then reopens
@@ -91,15 +172,13 @@ roughly six seconds after you stop hammering — *on the batch endpoint*. RoVali
 now runs close to that rather than at the ~25% of it that blind retrying
 managed.
 
-> **This is not the whole ceiling.** `bench.py` measures the two endpoints
-> separately and they turn out to be independent buckets with very different
-> limits: the stage-2 validator sustained **298 names/sec with zero 429s** on
-> the same IP where the batch endpoint was throttled at every pace. See
-> [BENCH.md](BENCH.md). Measure your own IP before assuming either number.
-
-**If stage 2 has more than ~100 candidates, use proxies.** Each proxy carries
-its own rate-limit bucket, and that is the only thing that lifts this ceiling.
-Free scraped proxies are enough — see below.
+> **This is not the whole ceiling, and the split above may be inverted on your
+> IP.** `bench.py` measures the two endpoints separately and they turn out to be
+> independent buckets with very different limits: the stage-2 validator
+> sustained **298 names/sec with zero 429s** on the same IP where the batch
+> endpoint was throttled at every pace. Which endpoint is your bottleneck is a
+> per-IP question. See [BENCH.md](BENCH.md), and measure your own IP before
+> assuming either number.
 
 ### Proxyless: don't fight the rate limiter
 
@@ -116,24 +195,24 @@ of every request it sent and ran at about a quarter of the achievable rate:
   after:   108s   (83 requests, 32 of them 429s)
 ```
 
-Almost the same number of 429s - what changed is what each one costs. Every
+Almost the same number of 429s — what changed is what each one costs. Every
 worker now parks on one shared resume time taken from the server's own
 `Retry-After`, instead of each backing off on its own schedule escalating
 from 7s toward 45s keyed to a per-name attempt counter. That lands within
 about 1.05x of the theoretical best the bucket allows.
 
 Note what this deliberately does *not* do: it never paces sends proactively.
-Spacing requests evenly is worse here, not better - a steady trickle into a
+Spacing requests evenly is worse here, not better — a steady trickle into a
 bucket whose clock keeps resetting can starve indefinitely, and in simulation
 even spacing failed to finish at any interval tried. Sending freely while the
 bucket is giving is also what keeps this safe if Roblox's real limits are more
 generous than the ones measured here; across every limiter shape simulated it
-was 1.3x-3.6x faster than before, and never slower.
+was 1.3x–3.6x faster than before, and never slower.
 
 ### With proxies: pool size is the lever, not worker count
 
 Each proxy carries its own rate-limit bucket, so throughput scales with how
-many proxies you have. It does not scale with workers - once there is roughly
+many proxies you have. It does not scale with workers — once there is roughly
 one worker per proxy, the pool's refill rate is the bound and extra workers
 only queue up behind it, spending their requests on 429s.
 
@@ -148,7 +227,7 @@ only queue up behind it, spending their requests on 429s.
 
 Pushing workers past that costs results rather than buying speed. On a
 25-proxy pool, 75 workers finished 9% quicker but found 1263 names where 25
-workers found all 1294 - the surplus workers push names past the point where
+workers found all 1294 — the surplus workers push names past the point where
 they are abandoned, and waste climbs from 65% of requests to 80%. The default
 is therefore one worker per proxy.
 
@@ -186,72 +265,6 @@ client-side scheduling:
 
 ---
 
-## Quick start
-
-### Windows
-
-Install Python from [python.org/downloads](https://python.org/downloads) — **tick "Add Python to PATH"** during install.
-
-Then open PowerShell in the unzipped folder and run:
-
-```powershell
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-python checker.py
-```
-
-After the first setup, just **double-click `run.bat`** to launch it.
-
-Use Windows Terminal or PowerShell rather than the old `cmd.exe` — the dashboard
-draws box characters that legacy consoles render poorly.
-
-### macOS / Linux
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-python checker.py
-```
-
-Or `./run.sh`.
-
-### Then what
-
-The wizard asks four things. Pressing Enter through all of them is a valid run:
-
-1. **Proxies** — choose `n` (none). You do not need them.
-2. **Usernames** — `g` to generate, pick a length, pick how many.
-3. **Speed** — accept the defaults.
-4. **Webhook** — `n` unless you want Discord notifications.
-
-When you generate names there is one extra question: **keep drawing new names
-until one is free?** Off by default. With it on, a round that finds nothing
-draws a fresh batch and goes again, stopping at the first hit or on Ctrl+C.
-Rounds share one rate-limit cooldown, so repeating costs no re-learning of the
-limit, and names an earlier round already checked are never re-checked.
-
-Results land in `results/hits.txt`, written the moment each hit is found.
-
-**Ctrl+C stops cleanly.** It finishes what is in flight, prints the summary, and
-writes every name it never got an answer for to `results/unresolved.txt` so you
-can re-run just those. Press it a second time to quit immediately instead.
-
-Each check prints above the live panel as it resolves - taken names dim out,
-hits show bright - with the stats staying pinned underneath. `--no-stream`
-turns it off.
-
-It renders at roughly 13,000 lines/sec (pre-built styles, batched output), so
-a proxyless run or a modest proxied one never notices it: the network is far
-slower than the rendering. It only becomes the bottleneck on a pool pushing
-past that, which is why the off switch exists.
-
-Flags: `--no-wizard` reuses your last setup, `--debug` logs every request,
-`--no-stream` quietens the feed, `--version`.
-
----
-
 ## Do you need proxies?
 
 **Probably not.** That is the point of the batching. Proxyless clears a few hundred
@@ -264,6 +277,27 @@ grinding tens of thousands of names.
 | Free scrape | one keypress | large lists, no budget |
 | Your own proxies | file or paste | tens of thousands of names |
 
+**If stage 2 has more than ~100 candidates, use proxies.** Each proxy carries
+its own rate-limit bucket, and that is the only thing that lifts this ceiling.
+
+The scrape pulls from 43 public lists and returns roughly 1,170,000 unique
+proxies in about four seconds. Almost all of them are dead, so RoValid screens
+the pool against the real endpoint before the run starts — one short timeout
+per proxy, all at once — rather than discovering each corpse mid-run at the
+cost of a stalled worker.
+
+That screen is the slow part, not the scrape, so the pool is trimmed to 30,000
+first (`SCRAPE_POOL_CAP`) and the screen then takes a few minutes. The trim is
+not uniform: seven of the sources are unchecked dumps that make up ~98% of the
+total, so sampling evenly would drown out the curated lists that publish only
+validated proxies. Every curated source is kept whole — about 23,000 proxies —
+and the dumps fill the remaining ~7,000 as a hedge against the curated lists
+being stale on any given day. Raise the cap if you want more; the cost is
+roughly one extra minute of screening per 7,000 proxies.
+
+Survivors are written to `data/proxies.txt`, so the next run can reuse them
+instead of screening again.
+
 Free proxies carry the usual caveat: an unknown operator sees that your IP connects
 to `roblox.com` and how often. They cannot see the names or the responses — traffic
 is HTTPS end-to-end with certificate verification left on, so a proxy only gets a
@@ -271,14 +305,98 @@ is HTTPS end-to-end with certificate verification left on, so a proxy only gets 
 
 ---
 
-## Nothing gets silently dropped
+## The live board
 
-Names that could not be resolved — dead proxy, exhausted retries — are written to
-`results/unresolved.txt`. Feed that file back in as your input to retry exactly
-those. A name is never quietly reclassified as taken because a request failed.
+`.github/workflows/hunt.yml` runs `hunt.py` on GitHub's own machines and commits
+anything it finds to `docs/hits.json`. GitHub Pages serves that file, so the
+board is live without a server, a database, or a machine of yours being switched
+on. The job publishes while it runs rather than once at the end.
 
-- `results/hits.txt` — confirmed available, appended across runs
-- `results/unresolved.txt` — needs a retry, rewritten each run
+Two passes run each time:
+
+| pass | what it does |
+|---|---|
+| **watchlist** | Re-checks 3,600 names people would actually want — real words, and shapes that read like names. All taken today; a release lands in the gold band at the top. |
+| **hunt** | Draws fresh random names at 3, 4 and 5 characters and screens them. |
+
+The watchlist is the interesting half. Free names are not scarce — a
+one-minute sample found 183 free five-character names and **not one was
+digit-free**. Good names are taken, and only come back when somebody renames
+away from one, so the board watches for exactly that rather than hoping to
+stumble on a good name at random.
+
+### What reaches the board
+
+Being free and being worth having are different questions, and the board
+answers the second.
+
+- **3 and 4 characters: everything.** Every name at both lengths is taken —
+  an exhaustive sweep of all 1,679,616 four-character names turned up nothing
+  — so anything that ever comes free is an event and goes up whatever it
+  looks like.
+- **5 characters: only what `rarity.is_noteworthy` accepts.** A palindrome, a
+  repeat, or any digit-free name qualifies outright. Below that a name has to
+  read: at most one digit, pronounceable, and carrying a real word — `mud5c`,
+  `d6bug`, `box8j`, `6cowv`, `4vhit`. Measured over 21,069 real finds that
+  keeps 29 of them, about one in 726.
+
+The totals still count every free name, because that is the true number. The
+column header shows both — `12 of 10,543 · 11 more` — rather than a find count
+next to a much shorter list, which is what used to make the page look broken.
+
+### Swipe a name away
+
+Twelve five-character names are on show at a time; the rest of what the hunter
+kept stays in reserve. Swipe one sideways — either direction — and the next
+best slides up to take its place. On a mouse or a keyboard the same thing is a
+small `×` on the row.
+
+Dismissals are yours, not the board's: they live in your browser's
+`localStorage`, never in `hits.json`, so they survive a reload and affect
+nobody else. A count and a **bring them back** link sit under the feed. Lengths
+3 and 4 are never windowed — a find at either is rare enough that all of it
+belongs on screen.
+
+Run it yourself against a local file instead of the live one:
+
+```bash
+python hunt.py --minutes 5 --lengths 3,4,5     # writes hits.local.json
+```
+
+`hunt.py` only writes `docs/hits.json` when explicitly told to (`--out
+docs/hits.json`), which is what the scheduled job passes. A local run
+committing its own snapshot would roll the board's running totals backwards.
+
+---
+
+## Configuration
+
+Everything the wizard learns is saved under `data/`, which is gitignored.
+
+| File | What it holds |
+|---|---|
+| `data/config.json` | Saved wizard answers — reused by `--no-wizard` |
+| `data/proxies.txt` | The proxy pool, one per line (`host:port` or `login:pass@host:port`) |
+| `data/names_to_check.txt` | The last username list, one per line |
+
+Keys in `data/config.json`:
+
+| Key | Meaning |
+|---|---|
+| `concurrency` | In-flight request budget, shared by both stages |
+| `timeout` | Per-request timeout in seconds |
+| `two_stage` | `false` sends every name to the validator (~200x the requests) |
+| `remove_proxies` | Drop proxies permanently once they fail |
+| `reuse_proxies` | Skip the "reuse them?" prompt in either direction |
+| `proxies_are_free` | Marks the saved pool as scraped, which turns on scoring, benching and pre-flight screening |
+| `webhook`, `webhook_message`, `webhook_always` | Discord notification settings |
+
+> **`data/config.json` holds your Discord webhook URL in plaintext.** That URL
+> is a credential — anyone holding it can post to your channel. It is gitignored,
+> but don't paste the file into an issue, and regenerate the webhook in Discord
+> if you ever do.
+
+Webhook message templates support `<name>`, `<link>`, `<time>` and `<elapsed>`.
 
 ---
 
@@ -295,9 +413,7 @@ thing at the cost of a request:
 Names are also de-duplicated case-insensitively — `Cool` and `cool` are the same
 registration on Roblox.
 
----
-
-## Validator response codes
+### Validator response codes
 
 Both endpoints answer under HTTP 200; the meaning is in the body.
 
@@ -313,16 +429,60 @@ Both endpoints answer under HTTP 200; the meaning is in the body.
 
 ---
 
-## Layout
+## Project layout
 
 ```
-checker.py        entry point, two-stage runner
+checker.py        entry point, two-stage runner, live dashboard
 config.py         endpoints, Roblox rules, Stats, JSON config
 wizard.py         interactive setup + proxy scraper
-proxy.py          rotation, cooldowns, scoring
+proxy.py          rotation, cooldowns, scoring, pre-flight screen
 engine.py         batch screen, validator, circuit breaker, webhook
-ui.py             rich dashboard
+ui.py             rich rendering primitives
+
+hunt.py           headless hunter for the live board
+watchlist.py      the names worth waiting for
+rarity.py         how good a name is, not just whether it's free
+docs/             GitHub Pages board (index.html reads hits.json)
+
+bench.py          measure the rate limiters directly  -> BENCH.md
+probe.py          is the batch limit per request or per username?
+tests/            unit tests for the pure logic
 ```
+
+---
+
+## Development
+
+```bash
+pip install -r requirements-dev.txt
+pytest                 # unit tests, no network
+ruff check .           # lint
+```
+
+Both run on every push and pull request via `.github/workflows/ci.yml`, across
+Python 3.11–3.13, alongside a smoke job that imports every module and checks the
+entry points still start.
+
+The tests cover the deterministic logic — username rules, tier scoring, the
+watchlist, the persistent config, the proxyless cooldown policy — and the two
+pieces where a mistake is expensive rather than merely wrong: the shared request
+loop (retries, 429 handling, the published limiter headers) and the two-stage
+pipeline (chunk retries, the fallback to stage 2, and never losing a name to a
+cancelled run). Both are driven by fakes, so nothing in the suite touches the
+network and the whole thing runs in a couple of seconds.
+
+---
+
+## Troubleshooting
+
+| Symptom | Cause and fix |
+|---|---|
+| Boxes and `?` instead of the dashboard border | Legacy `cmd.exe`. Use Windows Terminal or PowerShell. |
+| A wall of `ConnectionResetError` tracebacks on Windows | Roblox resets idle TLS sockets; `checker.py` already suppresses these. If you see them, you are on an old copy. |
+| `RuntimeError` from `asyncio.sslproto` on Python 3.13 | Known 3.13 SSL bug; `checker.py` patches it at import. |
+| Run starts fast, then decays to zero | Almost always the proxy pool. Run with `--diag` and read `logs/diag.csv`: the column that grows as throughput falls is the cause. |
+| Everything comes back "unresolved" | The pool could not reach Roblox. Re-run and let the pre-flight screen report how many proxies are alive; if it's zero, go proxyless. |
+| Chunks falling through to stage 2 | The summary says how many. It means stage 1 ran out of attempts, which is a pool-capacity problem, not a bug. |
 
 ---
 

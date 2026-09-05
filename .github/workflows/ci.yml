@@ -1,0 +1,95 @@
+name: ci
+
+on:
+  push:
+    branches: ["**"]
+    # The hunt workflow commits docs/hits.json every couple of minutes. Those
+    # commits touch no code, and running the full matrix on each of them would
+    # be most of this repo's CI minutes spent proving nothing changed.
+    paths-ignore:
+      - "docs/**"
+      - "**.md"
+  pull_request:
+  workflow_dispatch:
+
+# A new push supersedes the run already in flight for the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - name: ruff
+        run: ruff check --output-format=github .
+
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.11 is the floor (the code uses `X | Y` annotations at runtime via
+        # `from __future__ import annotations`, and 3.11 syntax throughout).
+        # 3.13 is here because checker.py carries a workaround for an asyncio
+        # SSL bug that only shows up there - if that ever stops being needed,
+        # this job is where it will show.
+        python-version: ["3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+      - run: pip install -r requirements-dev.txt
+      - name: pytest
+        run: pytest
+
+  smoke:
+    # Every module has to import cleanly and every entry point has to answer
+    # --help. Neither is covered by the unit tests, and both are how this
+    # project actually breaks: a bad import in wizard.py is invisible until
+    # somebody runs it.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+      - run: pip install -r requirements.txt
+      - name: import every module
+        run: |
+          python -c "
+          import importlib
+          for m in ('config', 'engine', 'proxy', 'ui', 'wizard', 'checker',
+                    'rarity', 'watchlist', 'hunt', 'bench', 'probe'):
+              importlib.import_module(m)
+              print('ok', m)
+          "
+      - name: entry points respond to --help
+        run: |
+          python checker.py --version
+          python hunt.py --help > /dev/null
+          python bench.py --help > /dev/null
+      - name: the board file is valid JSON with the shape the page reads
+        run: |
+          python -c "
+          import json, pathlib
+          d = json.loads(pathlib.Path('docs/hits.json').read_text())
+          assert isinstance(d.get('lengths'), dict), 'missing lengths'
+          assert isinstance(d.get('totals'), dict), 'missing totals'
+          print('board ok:', {k: len(v) for k, v in d['lengths'].items()})
+          "
