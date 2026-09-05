@@ -417,9 +417,13 @@ Both run on every push and pull request via `.github/workflows/ci.yml`, across
 Python 3.11–3.13, alongside a smoke job that imports every module and checks the
 entry points still start.
 
-The tests cover the pure, deterministic logic — username rules, tier scoring,
-the watchlist, the persistent config, and the proxyless cooldown policy. Nothing
-in the suite touches the network, so it runs in well under a second.
+The tests cover the deterministic logic — username rules, tier scoring, the
+watchlist, the persistent config, the proxyless cooldown policy — and the two
+pieces where a mistake is expensive rather than merely wrong: the shared request
+loop (retries, 429 handling, the published limiter headers) and the two-stage
+pipeline (chunk retries, the fallback to stage 2, and never losing a name to a
+cancelled run). Both are driven by fakes, so nothing in the suite touches the
+network and the whole thing runs in a couple of seconds.
 
 ---
 

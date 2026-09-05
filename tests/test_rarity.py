@@ -42,3 +42,13 @@ def test_every_word_is_lowercase_ascii_and_in_range():
     for word in WORDS:
         assert word.isascii() and word.isalpha() and word.islower(), word
         assert 3 <= len(word) <= 5, word
+
+
+def test_no_truncated_non_words_survive():
+    # These three shipped in the legendary tier, produced by slice hacks in
+    # the word list - "wolf"[:3], "fierce"[:5], "spiral"[:5] - and from there
+    # went onto the watchlist, which re-checks every entry on every run.
+    for junk in ("wol", "fierc", "spira"):
+        assert junk not in WORDS
+    # The two slices that did land on real words are still there as words.
+    assert {"pear", "rave", "wolf"} <= WORDS

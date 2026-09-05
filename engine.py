@@ -65,6 +65,39 @@ def dbg(*args, **kwargs) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Published limiter state
+# ---------------------------------------------------------------------------
+
+def limiter_state(headers) -> tuple[int | None, float | None]:
+    """(requests left, seconds until the window resets) as the server reports.
+
+    Both endpoints publish their own limiter state on every response, 429s
+    included (BENCH.md 1):
+
+        x-ratelimit-limit:     500, 500;w=60
+        x-ratelimit-remaining: 499
+        x-ratelimit-reset:     39
+
+    Either half is None when the header is missing or unparseable, which is
+    the normal case behind a proxy that rewrites headers.
+    """
+    remaining = reset = None
+    try:
+        raw = headers.get("x-ratelimit-remaining")
+        if raw is not None:
+            remaining = int(str(raw).strip())
+    except (TypeError, ValueError):
+        remaining = None
+    try:
+        raw = headers.get("x-ratelimit-reset")
+        if raw is not None:
+            reset = float(str(raw).strip())
+    except (TypeError, ValueError):
+        reset = None
+    return remaining, reset
+
+
+# ---------------------------------------------------------------------------
 # Circuit breaker - prevents thundering herd on a rotating proxy
 # ---------------------------------------------------------------------------
 
@@ -353,7 +386,25 @@ class RobloxChecker:
                 cooldown = float(header or 0)
             except (TypeError, ValueError):
                 cooldown = 0.0
-        dbg(f"  [429] body={str(body)[:160]} Retry-After={header!r}")
+
+        remaining, reset = limiter_state(resp.headers)
+        if not cooldown and remaining == 0 and reset and reset > 0:
+            # The published quota really is spent, so its own reset clock is
+            # ground truth and beats guessing at a backoff.
+            #
+            # Deliberately narrow, because most 429s here are not this case.
+            # Measured (BENCH.md 1): a throttled IP 429s on the batch endpoint
+            # with remaining=499 of 500 - 99.8% of the quota unspent - because
+            # an unpublished short-window burst limiter sits in front of it.
+            # Reading the reset clock on one of those would park for 39s where
+            # the burst limiter reopens in about 6, so the escalating fallback
+            # stays in charge everywhere except here.
+            cooldown = reset
+
+        dbg(
+            f"  [429] body={str(body)[:160]} Retry-After={header!r} "
+            f"remaining={remaining} reset={reset}"
+        )
 
         if self._stats:
             self._stats.inc("ratelimited")
@@ -397,6 +448,123 @@ class RobloxChecker:
         await self.pm.set_cooldown(proxy, 3)
         await asyncio.sleep(min(attempt * 0.15, 5.0))
 
+    async def _send_with_retries(
+        self,
+        *,
+        label: str,
+        batch: bool,
+        make_request,
+        on_ok,
+        on_bad_request,
+        on_give_up,
+    ):
+        """Run one request to completion, retrying whatever is worth retrying.
+
+        Both stages ask a different endpoint a different question, and used to
+        do it through two copies of this loop. Everything they share lives here
+        now: picking a proxy, counting attempts against the retry ceiling and
+        the time budget, waiting out the shared proxyless cooldown, holding a
+        slot in the in-flight gate for the request *only*, scoring the proxy on
+        the answer, and turning 429s and connection errors into a backoff the
+        caller never sees.
+
+        The caller supplies the four things that actually differ:
+
+        - `make_request(proxy)` builds the request context manager
+        - `on_ok(resp)` reads a 200 and returns the caller's own answer
+        - `on_bad_request(resp)` handles a 400, which retrying cannot fix
+        - `on_give_up(reason)` names the answer when there is no answer;
+          reason is "no_proxy", "retries" or "budget"
+        """
+        attempt = 0
+        started = time.time()
+
+        while True:
+            proxy = await self.pm.next()
+            if proxy is None and not self.pm.is_proxyless:
+                if self._stats:
+                    self._stats.inc("no_proxy")
+                return on_give_up("no_proxy")
+
+            attempt += 1
+            if attempt > self._max_retries:
+                return on_give_up("retries")
+            if (
+                not self._rotating
+                and not self._proxyless
+                and time.time() - started > self._total_budget()
+            ):
+                return on_give_up("budget")
+
+            if self._stats:
+                self._stats.inc("requests")
+                if batch:
+                    self._stats.inc("batch_requests")
+
+            if self._cooldown is not None:
+                # Clear the cooldown before taking a gate slot, so a parked
+                # worker is not sitting on in-flight capacity while it waits.
+                await self._cooldown.wait()
+
+            backoff = 0.0
+            try:
+                # The gate covers only the request itself, so the retry sleeps
+                # below release the slot for another worker to use.
+                async with self._gate, make_request(proxy) as resp:
+                    dbg(f"  [{attempt}] {label} -> HTTP {resp.status}")
+
+                    if self._stats:
+                        self._stats.inc(
+                            "ok_responses" if resp.status == 200
+                            else "http_errors"
+                        )
+
+                    if resp.status == 200:
+                        # Read the body before rewarding anything. A free
+                        # proxy that injects its own error page still answers
+                        # 200, and scoring that as a hit would keep a broken
+                        # route at full weight; letting on_ok raise sends it
+                        # down the retry path instead.
+                        result = await on_ok(resp)
+                        if self._scraped and proxy:
+                            self.pm.score_hit(proxy)
+                        if self._cooldown is not None:
+                            self._cooldown.succeed()
+                        return result
+
+                    if resp.status == 400:
+                        return await on_bad_request(resp)
+
+                    if resp.status == 429:
+                        backoff = await self._handle_429(resp, proxy, attempt)
+                    else:
+                        # Any other status through a scraped proxy is the
+                        # proxy failing, not Roblox answering: a dead free
+                        # proxy answers 502/503/403 rather than refusing the
+                        # connection. Only connection errors used to count as
+                        # a miss, so those proxies were never scored down,
+                        # never benched and never buried - they stayed
+                        # permanently available at weight 1 while working
+                        # proxies cycled on and off the bench. The pool
+                        # therefore skewed further toward them the longer a
+                        # run went on, which is the decay to zero that
+                        # outlived three other fixes.
+                        if self._scraped and proxy:
+                            self.pm.score_miss(proxy)
+                        backoff = 0.5
+
+            except (TimeoutError, aiohttp.ClientError, OSError) as exc:
+                dbg(f"  [{attempt}] {label} -> {type(exc).__name__}")
+                await self._on_conn_error(proxy, attempt)
+                continue
+            except Exception as exc:
+                dbg(f"  [{attempt}] {label} -> {type(exc).__name__}: {exc!s:.100}")
+                await asyncio.sleep(0.3)
+                continue
+
+            if backoff > 0:
+                await asyncio.sleep(backoff)
+
     # ── Stage 1: bulk existence screen ─────────────────────────────────────
 
     async def batch_screen(
@@ -415,101 +583,34 @@ class RobloxChecker:
         Returns MALFORMED_CHUNK when the endpoint rejected the chunk itself
         (HTTP 400), which no amount of retrying will fix.
         """
-        attempt = 0
-        started = time.time()
         payload = {"usernames": names, "excludeBannedUsers": False}
 
-        while True:
-            proxy = await self.pm.next()
-            if proxy is None and not self.pm.is_proxyless:
-                if self._stats:
-                    self._stats.inc("no_proxy")
-                return None
+        async def _ok(resp):
+            data = await resp.json()
+            return {
+                entry.get("requestedUsername", "").lower()
+                for entry in data.get("data", [])
+                if entry.get("requestedUsername")
+            }
 
-            attempt += 1
-            if attempt > self._max_retries:
-                return None
-            if (
-                not self._rotating
-                and not self._proxyless
-                and time.time() - started > self._total_budget()
-            ):
-                return None
+        async def _bad_request(resp):
+            dbg(f"  [batch] HTTP 400: {(await resp.text())[:120]}")
+            return MALFORMED_CHUNK
 
-            if self._stats:
-                self._stats.inc("requests")
-                self._stats.inc("batch_requests")
-
-            if self._cooldown is not None:
-                # Clear the cooldown before taking a gate slot, so a parked
-                # worker is not sitting on in-flight capacity while it waits.
-                await self._cooldown.wait()
-
-            backoff = 0.0
-            try:
-                # The gate covers only the request itself, so retry sleeps
-                # below release the slot for another worker to use.
-                async with self._gate:
-                    async with session.post(
-                        BATCH_ENDPOINT,
-                        json=payload,
-                        proxy=proxy,
-                        headers=_JSON_HEADERS,
-                        timeout=self._req_timeout(),
-                    ) as resp:
-                        dbg(f"  [batch {attempt}] {len(names)} names -> HTTP {resp.status}")
-
-                        if self._stats:
-                            self._stats.inc(
-                                "ok_responses" if resp.status == 200
-                                else "http_errors"
-                            )
-                        if resp.status == 200:
-                            data = await resp.json()
-                            if self._scraped and proxy:
-                                self.pm.score_hit(proxy)
-                            if self._cooldown is not None:
-                                self._cooldown.succeed()
-                            return {
-                                entry.get("requestedUsername", "").lower()
-                                for entry in data.get("data", [])
-                                if entry.get("requestedUsername")
-                            }
-
-                        if resp.status == 400:
-                            # The chunk itself is bad; retrying cannot help.
-                            dbg(f"  [batch] HTTP 400: {(await resp.text())[:120]}")
-                            return MALFORMED_CHUNK
-
-                        if resp.status == 429:
-                            backoff = await self._handle_429(resp, proxy, attempt)
-                        else:
-                            # Any other status through a scraped proxy is the
-                            # proxy failing, not Roblox answering: a dead free
-                            # proxy answers 502/503/403 rather than refusing
-                            # the connection. Only connection errors used to
-                            # count as a miss, so those proxies were never
-                            # scored down, never benched and never buried -
-                            # they stayed permanently available at weight 1
-                            # while working proxies cycled on and off the
-                            # bench. The pool therefore skewed further toward
-                            # them the longer a run went on, which is the
-                            # decay to zero that outlived three other fixes.
-                            if self._scraped and proxy:
-                                self.pm.score_miss(proxy)
-                            backoff = 0.5
-
-            except (TimeoutError, aiohttp.ClientError, OSError) as exc:
-                dbg(f"  [batch {attempt}] {type(exc).__name__}")
-                await self._on_conn_error(proxy, attempt)
-                continue
-            except Exception as exc:
-                dbg(f"  [batch {attempt}] {type(exc).__name__}: {exc!s:.100}")
-                await asyncio.sleep(0.3)
-                continue
-
-            if backoff > 0:
-                await asyncio.sleep(backoff)
+        return await self._send_with_retries(
+            label=f"batch {len(names)} names",
+            batch=True,
+            make_request=lambda proxy: session.post(
+                BATCH_ENDPOINT,
+                json=payload,
+                proxy=proxy,
+                headers=_JSON_HEADERS,
+                timeout=self._req_timeout(),
+            ),
+            on_ok=_ok,
+            on_bad_request=_bad_request,
+            on_give_up=lambda reason: None,
+        )
 
     # ── Stage 2: signup validator ──────────────────────────────────────────
 
@@ -523,102 +624,45 @@ class RobloxChecker:
         Returns (outcome, code) where outcome is one of
         AVAILABLE / TAKEN / CENSORED / INVALID / ERROR / EXHAUSTED.
         """
-        attempt = 0
-        started = time.time()
         params = {
             "request.username": username,
             "request.birthday": VALIDATE_BIRTHDAY,
             "request.context": VALIDATE_CONTEXT,
         }
 
-        while True:
-            proxy = await self.pm.next()
-            if proxy is None and not self.pm.is_proxyless:
-                if self._stats:
-                    self._stats.inc("no_proxy")
-                return (EXHAUSTED, None)
+        async def _ok(resp):
+            code = (await resp.json()).get("code")
+            if code == CODE_AVAILABLE:
+                return (AVAILABLE, code)
+            if code == CODE_TAKEN:
+                return (TAKEN, code)
+            if code == CODE_CENSORED:
+                return (CENSORED, code)
+            return (INVALID, code)
 
-            attempt += 1
-            if attempt > self._max_retries:
-                return (ERROR, None)
-            if (
-                not self._rotating
-                and not self._proxyless
-                and time.time() - started > self._total_budget()
-            ):
-                return (ERROR, None)
+        async def _bad_request(_resp):
+            return (INVALID, None)
 
-            if self._stats:
-                self._stats.inc("requests")
+        def _give_up(reason):
+            # An exhausted pool and an exhausted retry budget are different
+            # facts - the first says there is no route left, the second that
+            # this one name never got a verdict - but both mean the name goes
+            # to the retry list rather than being called taken.
+            return (EXHAUSTED, None) if reason == "no_proxy" else (ERROR, None)
 
-            if self._cooldown is not None:
-                await self._cooldown.wait()
-
-            backoff = 0.0
-            try:
-                # As in batch_screen: hold a request slot for the request
-                # only, never across a backoff sleep.
-                async with self._gate:
-                    async with session.get(
-                        VALIDATE_ENDPOINT,
-                        params=params,
-                        proxy=proxy,
-                        timeout=self._req_timeout(),
-                    ) as resp:
-                        dbg(f"  [{attempt}] {username} -> HTTP {resp.status}")
-
-                        if self._stats:
-                            self._stats.inc(
-                                "ok_responses" if resp.status == 200
-                                else "http_errors"
-                            )
-                        if resp.status == 200:
-                            data = await resp.json()
-                            code = data.get("code")
-                            if self._scraped and proxy:
-                                self.pm.score_hit(proxy)
-                            if self._cooldown is not None:
-                                self._cooldown.succeed()
-                            if code == CODE_AVAILABLE:
-                                return (AVAILABLE, code)
-                            if code == CODE_TAKEN:
-                                return (TAKEN, code)
-                            if code == CODE_CENSORED:
-                                return (CENSORED, code)
-                            return (INVALID, code)
-
-                        if resp.status == 400:
-                            return (INVALID, None)
-
-                        if resp.status == 429:
-                            backoff = await self._handle_429(resp, proxy, attempt)
-                        else:
-                            # Any other status through a scraped proxy is the
-                            # proxy failing, not Roblox answering: a dead free
-                            # proxy answers 502/503/403 rather than refusing
-                            # the connection. Only connection errors used to
-                            # count as a miss, so those proxies were never
-                            # scored down, never benched and never buried -
-                            # they stayed permanently available at weight 1
-                            # while working proxies cycled on and off the
-                            # bench. The pool therefore skewed further toward
-                            # them the longer a run went on, which is the
-                            # decay to zero that outlived three other fixes.
-                            if self._scraped and proxy:
-                                self.pm.score_miss(proxy)
-                            backoff = 0.5
-
-            except (TimeoutError, aiohttp.ClientError, OSError) as exc:
-                dbg(f"  [{attempt}] {username} -> {type(exc).__name__}")
-                await self._on_conn_error(proxy, attempt)
-                continue
-            except Exception as exc:
-                dbg(f"  [{attempt}] {username} -> {type(exc).__name__}: {exc!s:.100}")
-                await asyncio.sleep(0.3)
-                continue
-
-            if backoff > 0:
-                await asyncio.sleep(backoff)
+        return await self._send_with_retries(
+            label=username,
+            batch=False,
+            make_request=lambda proxy: session.get(
+                VALIDATE_ENDPOINT,
+                params=params,
+                proxy=proxy,
+                timeout=self._req_timeout(),
+            ),
+            on_ok=_ok,
+            on_bad_request=_bad_request,
+            on_give_up=_give_up,
+        )
 
 
 # ---------------------------------------------------------------------------
