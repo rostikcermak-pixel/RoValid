@@ -1,9 +1,9 @@
 """Picking a workable pool out of what the scrapers return.
 
-The scrape returns ~166,000 unique proxies across 27 sources, and the
+The scrape returns ~1,170,000 unique proxies across 43 sources, and the
 pre-flight screen costs up to PRESCREEN_TIMEOUT seconds each. So the pool has
-to be trimmed, and *which* proxies get trimmed matters: four unchecked dumps
-are ~93% of the total, so a uniform sample would be almost entirely dumps and
+to be trimmed, and *which* proxies get trimmed matters: seven unchecked dumps
+are ~98% of the total, so a uniform sample would be almost entirely dumps and
 would crowd out the curated lists that publish only validated proxies.
 """
 
