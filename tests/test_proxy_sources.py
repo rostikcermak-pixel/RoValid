@@ -9,7 +9,7 @@ would crowd out the curated lists that publish only validated proxies.
 
 import pytest
 
-from wizard import BULK_SOURCES, SCRAPE_POOL_CAP, _select_pool
+from wizard import BULK_SOURCES, SCRAPE_POOL_CAP, _normalise_proxy, _select_pool
 
 
 def addrs(prefix, n):
@@ -93,5 +93,37 @@ def test_every_bulk_source_is_actually_a_configured_source(name):
 
 def test_the_cap_leaves_room_for_the_dumps():
     # If the cap ever drops below what the curated sources alone return,
-    # fetching the dumps is wasted work. Measured: ~15,200 curated.
-    assert SCRAPE_POOL_CAP > 15_200
+    # fetching the dumps is wasted work. Measured: ~23,000 curated.
+    assert SCRAPE_POOL_CAP > 23_000
+
+
+# ── line parsing ───────────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("line, expected", [
+    ("1.2.3.4:8080", "1.2.3.4:8080"),
+    ("  1.2.3.4:8080  ", "1.2.3.4:8080"),
+    ("http://1.2.3.4:8080", "http://1.2.3.4:8080"),
+    ("user:pass@1.2.3.4:8080", "user:pass@1.2.3.4:8080"),
+    ("proxy.example.com:3128", "proxy.example.com:3128"),
+    # hideip.me publishes host:port:Country. Rejecting these lost the whole
+    # source; the extra fields are trimmed instead.
+    ("222.127.55.155:8082:Philippines", "222.127.55.155:8082"),
+    ("84.17.47.150:9002:The Netherlands", "84.17.47.150:9002"),
+    ("1.2.3.4:8080:US:elite", "1.2.3.4:8080"),
+])
+def test_normalise_accepts_real_proxy_lines(line, expected):
+    assert _normalise_proxy(line) == expected
+
+
+@pytest.mark.parametrize("line", [
+    "",
+    "   ",
+    "Proxy list (#400) updated at Sat, 05 Sep 26 16:58:01 +0300",
+    "Socks proxy=https://spys.me/socks.txt",
+    "not-a-proxy",
+    "1.2.3.4",
+    "1.2.3.4:notaport",
+    "# comment",
+])
+def test_normalise_rejects_everything_else(line):
+    assert _normalise_proxy(line) is None
