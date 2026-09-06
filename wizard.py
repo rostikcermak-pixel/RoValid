@@ -580,12 +580,12 @@ async def _prescreen_proxies(pool: list[str]) -> list[str]:
 # Proxy scraper
 # ---------------------------------------------------------------------------
 
-# The four unchecked dumps. Between them they are ~93% of everything the
-# scrape returns, so a uniform sample down to the cap below would be ~93%
-# unchecked and would crowd out the curated lists - the ones that publish
-# only proxies they have already validated, and that therefore survive the
-# pre-flight screen at a far better rate. Every other source is kept whole
-# and these four fill only whatever cap budget is left over.
+# The unchecked dumps. Between them they are ~97% of everything the scrape
+# returns, so a uniform sample down to the cap below would be ~97% unchecked
+# and would crowd out the curated lists - the ones that publish only proxies
+# they have already validated, and that therefore survive the pre-flight
+# screen at a far better rate. Every other source is kept whole; these
+# contribute a fixed BULK_SAMPLE on top.
 BULK_SOURCES = {
     "mishakorzik", "casals-ar", "SevenworksDev", "MuRongPIG",
     "ErcinDedeoglu", "zevtyardt", "yuceltoluyag",
