@@ -18,17 +18,18 @@ import random
 import string
 import sys
 import time
-from datetime import datetime, timezone
+from collections import deque
+from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Callable
 
 import aiohttp
 
+import watchlist
 from config import BATCH_MAX, Stats, is_valid_username
 from engine import AVAILABLE, MALFORMED_CHUNK, RobloxChecker, SharedCooldown
 from proxy import ProxyManager
-from rarity import rate
-import watchlist
+from rarity import is_noteworthy, rate
 
 # The live file the page reads. It belongs to the scheduled run, which is
 # the only thing that should ever write it: a local test run holds a stale
@@ -46,7 +47,22 @@ LOCAL_OUT = Path("hits.local.json")
 # whatever it sees, so this is really "how fresh the site is" - against a run
 # that now lasts most of an hour, twenty seconds is plenty.
 WRITE_EVERY = 20.0
-KEEP_PER_LENGTH = 60
+
+# Lengths 3 and 4 keep everything they find. Every three-character name and
+# every one of the 1,679,616 four-character names is taken - an exhaustive
+# sweep turned up nothing - so a find at either length is an event and goes on
+# the board whatever it looks like. The cap is only a guard against a
+# pathological run bloating a file that is committed every couple of minutes
+# forever; nothing has ever come close to it.
+KEEP_ALL_LENGTHS = {3, 4}
+KEEP_RARE_LENGTH = 500
+
+# Length 5 is the opposite problem: ten thousand free names in a run and
+# almost all of them licence plates. Only what rarity.is_noteworthy accepts
+# reaches the board, which measures at about one name in 726, so 200 slots is
+# far more than a run fills.
+KEEP_PER_LENGTH = 200
+
 KEEP_RELEASED = 40
 
 # Ordering on the page. Free names are not scarce - a one-minute sample found
@@ -95,6 +111,44 @@ def load_existing(out: Path) -> dict:
         return {"updated": None, "lengths": {}, "totals": {}}
 
 
+async def validate_all(
+    checker: RobloxChecker,
+    session: aiohttp.ClientSession,
+    names: list[str],
+    deadline: float,
+    record: Callable[[str], None],
+    workers: int,
+) -> None:
+    """Validate every name in *names*, calling *record* on each free one.
+
+    Stage 2 costs one request per name and Roblox exposes no bulk validator,
+    so the number of requests is fixed - but they do not have to be serial,
+    and here they were: both passes awaited one `validate` at a time, which
+    made --workers a knob that did nothing. Measured on the live validator,
+    that bucket sustains ~300 names/sec on a single IP with no 429s at all
+    (BENCH.md 3), so running one at a time left almost all of it unused.
+
+    `RobloxChecker` already caps real concurrency with an in-flight semaphore
+    sized to --workers, so a pool of that many drainers spends exactly the
+    budget the caller asked for and no more. Names left in the queue when the
+    deadline passes are simply not checked this run - the next run redraws.
+    """
+    if not names:
+        return
+    queue = deque(names)
+
+    async def _drain() -> None:
+        # `while queue` and `popleft` with no await between them, so a name is
+        # handed to exactly one drainer.
+        while queue and time.monotonic() < deadline:
+            name = queue.popleft()
+            outcome, _code = await checker.validate(session, name)
+            if outcome == AVAILABLE:
+                record(name)
+
+    await asyncio.gather(*(_drain() for _ in range(min(workers, len(names)))))
+
+
 async def hunt_length(
     checker: RobloxChecker,
     session: aiohttp.ClientSession,
@@ -102,6 +156,7 @@ async def hunt_length(
     budget: float,
     seen: set[str],
     record: Callable[[str], None],
+    workers: int,
 ) -> tuple[int, int]:
     """Screen names for *budget*s, calling *record* on each free one.
 
@@ -111,9 +166,9 @@ async def hunt_length(
     """
     checked = 0
     survivors_seen = 0
-    started = time.monotonic()
+    deadline = time.monotonic() + budget
 
-    while time.monotonic() - started < budget:
+    while time.monotonic() < deadline:
         names = draw(length, BATCH_MAX, seen)
         if not names:
             break                      # space exhausted for this length
@@ -126,12 +181,9 @@ async def hunt_length(
 
         survivors = [n for n in names if n.lower() not in taken]
         survivors_seen += len(survivors)
-        for name in survivors:
-            if time.monotonic() - started >= budget:
-                break
-            outcome, _code = await checker.validate(session, name)
-            if outcome == AVAILABLE:
-                record(name)
+        await validate_all(
+            checker, session, survivors, deadline, record, workers,
+        )
     return checked, survivors_seen
 
 
@@ -141,6 +193,7 @@ async def watch_pass(
     names: list[str],
     budget: float,
     record: Callable[[str], None],
+    workers: int,
     start: int = 0,
 ) -> tuple[int, int]:
     """Re-check the watchlist and return any name that has come free.
@@ -151,7 +204,7 @@ async def watch_pass(
     from it.
     """
     checked = 0
-    started = time.monotonic()
+    deadline = time.monotonic() + budget
     # Resume where the last run stopped and wrap around. A budget always
     # cuts this pass short, so starting from zero every time would watch the
     # first few hundred names forever and never once look at the rest.
@@ -163,24 +216,20 @@ async def watch_pass(
         # natural end - it will screen every name it is given and validate
         # every survivor. Without a deadline it eats the whole run, which is
         # exactly what it did the first time.
-        if time.monotonic() - started >= budget:
+        if time.monotonic() >= deadline:
             break
         chunk = order[i:i + BATCH_MAX]
         taken = await checker.batch_screen(session, chunk)
         if taken is None or taken is MALFORMED_CHUNK:
             continue
         checked += len(chunk)
-        for name in chunk:
-            if name.lower() in taken:
-                continue
-            if time.monotonic() - started >= budget:
-                break
-            # Stage 1 only says no account holds it. The validator is what
-            # separates a genuine release from a name Roblox censors or
-            # reserves, and on a watchlist that distinction is the point.
-            outcome, _code = await checker.validate(session, name)
-            if outcome == AVAILABLE:
-                record(name)
+        # Stage 1 only says no account holds these. The validator is what
+        # separates a genuine release from a name Roblox censors or reserves,
+        # and on a watchlist that distinction is the point.
+        survivors = [n for n in chunk if n.lower() not in taken]
+        await validate_all(
+            checker, session, survivors, deadline, record, workers,
+        )
         cursor = (start + i + len(chunk)) % len(names)
     return checked, cursor
 
@@ -234,7 +283,7 @@ async def main() -> int:
     last_write = 0.0
 
     def stamp() -> str:
-        return datetime.now(timezone.utc).isoformat(timespec="seconds")
+        return datetime.now(UTC).isoformat(timespec="seconds")
 
     def publish(force: bool = False) -> None:
         """Write the board out mid-run.
@@ -282,7 +331,7 @@ async def main() -> int:
                 publish()
 
             watched, cursor = await watch_pass(
-                checker, session, names, watch_budget, release,
+                checker, session, names, watch_budget, release, args.workers,
                 start=int(data.get("watch_cursor", 0)) % max(len(names), 1),
             )
             data["watch_cursor"] = cursor
@@ -294,10 +343,23 @@ async def main() -> int:
             budget = seconds * weights.get(length, 4.0) / total_w
             key = str(length)
             totals = data["totals"].setdefault(key, {"checked": 0, "found": 0})
+            totals.setdefault("kept", 0)
             hits = 0
 
-            def keep(name: str, key=key, totals=totals) -> None:
+            def keep(name: str, key=key, totals=totals, length=length) -> None:
                 nonlocal fresh_total, hits
+                # Counted whether or not it earns a place. How many names are
+                # free and how many are worth showing are different questions,
+                # and the board used to answer only the first while displaying
+                # an answer to the second.
+                totals["found"] += 1
+                fresh_total += 1
+                hits += 1
+
+                keep_all = length in KEEP_ALL_LENGTHS
+                if not keep_all and not is_noteworthy(name):
+                    return
+
                 tier, weight = rate(name)
                 entries = data["lengths"].setdefault(key, [])
                 entries.append({
@@ -305,19 +367,18 @@ async def main() -> int:
                     "tier": tier, "weight": weight,
                 })
                 entries.sort(key=_order)
-                del entries[KEEP_PER_LENGTH:]
-                totals["found"] += 1
-                fresh_total += 1
-                hits += 1
+                del entries[KEEP_RARE_LENGTH if keep_all else KEEP_PER_LENGTH:]
+                totals["kept"] = len(entries)
                 publish()
 
             checked, survivors = await hunt_length(
-                checker, session, length, budget, seen, keep,
+                checker, session, length, budget, seen, keep, args.workers,
             )
             totals["checked"] += checked
             print(
                 f"  len {length}: {budget:.0f}s, screened {checked:,}, "
-                f"survivors {survivors:,}, free {hits}", flush=True,
+                f"survivors {survivors:,}, free {hits}, "
+                f"on the board {totals['kept']}", flush=True,
             )
             publish(force=True)
 
@@ -334,7 +395,7 @@ async def main() -> int:
         hard_cap = args.minutes * 60 * 1.6
         try:
             await asyncio.wait_for(work(session), timeout=hard_cap)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             print(f"  (hit the {hard_cap:.0f}s hard stop - saving what we have)",
                   flush=True)
 

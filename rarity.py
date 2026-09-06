@@ -31,7 +31,7 @@ WORDS = {
     "pop", "pot", "ram", "rat", "raw", "red", "rib", "rip", "rob", "run",
     "sad", "sea", "sky", "sun", "tag", "tap", "tax", "tea", "ten", "tip",
     "toe", "top", "toy", "van", "war", "wax", "web", "wet", "who", "win",
-    "wolf"[:3], "yes", "zap", "zen", "zip", "zoo",
+    "yes", "zap", "zen", "zip", "zoo",
     # 4
     "acid", "atom", "aura", "bank", "bass", "beam", "bear", "beat", "bell",
     "bird", "bite", "blue", "boom", "bolt", "bone", "book", "boss", "brew",
@@ -54,10 +54,10 @@ WORDS = {
     "moon", "moss", "moth", "muse", "myth", "nail", "name", "navy", "neon",
     "nest", "news", "next", "nice", "node", "none", "noon", "norm", "note",
     "nova", "oath", "onyx", "opal", "open", "oval", "pace", "pack", "page",
-    "pain", "pale", "palm", "park", "path", "peak", "pearl"[:4], "pine",
+    "pain", "pale", "palm", "park", "path", "peak", "pear", "pine",
     "pink", "plan", "play", "plot", "plus", "poem", "pole", "pond", "pony",
     "pool", "pore", "port", "pose", "pull", "pure", "push", "quiz", "race",
-    "rage", "rail", "rain", "rank", "rare", "rate", "raven"[:4], "real",
+    "rage", "rail", "rain", "rank", "rare", "rate", "rave", "real",
     "reef", "rest", "rich", "ride", "ring", "riot", "rise", "risk", "road",
     "roar", "robe", "rock", "role", "roll", "roof", "room", "root", "rope",
     "rose", "ruby", "rule", "rush", "rust", "sage", "sail", "salt", "sand",
@@ -99,7 +99,7 @@ WORDS = {
     "ember", "empty", "enemy", "enjoy", "enter", "envoy", "equal", "error",
     "essay", "event", "every", "exact", "exile", "exist", "extra", "fable",
     "faint", "fairy", "faith", "false", "fancy", "fatal", "fault", "favor",
-    "feast", "fence", "ferry", "fever", "fiber", "field", "fiend", "fierce"[:5],
+    "feast", "fence", "ferry", "fever", "fiber", "field", "fiend",
     "fifth", "fight", "final", "flame", "flare", "flash", "fleet", "flesh",
     "flint", "float", "flood", "floor", "flora", "flour", "fluid", "flute",
     "focus", "force", "forge", "forth", "found", "frame", "fraud", "fresh",
@@ -151,7 +151,7 @@ WORDS = {
     "smoke", "snack", "snake", "sneak", "solar", "solid", "solve", "sonic",
     "sorry", "sound", "south", "space", "spade", "spare", "spark", "spawn",
     "speak", "spear", "speed", "spell", "spend", "spice", "spike", "spine",
-    "spiral"[:5], "spire", "spite", "split", "spoke", "spoon", "sport",
+    "spire", "spite", "split", "spoke", "spoon", "sport",
     "spray", "spree", "squad", "stack", "staff", "stage", "stain", "stair",
     "stake", "stalk", "stall", "stamp", "stand", "stare", "stark", "start",
     "state", "steal", "steam", "steel", "steep", "steer", "stern", "stick",
@@ -222,6 +222,46 @@ def _patterned(name: str) -> bool:
     if len(name) == 4 and name[:2] == name[2:]:
         return True
     return False
+
+
+def _embedded_word(name: str) -> str | None:
+    """The longest word from WORDS sitting inside *name*, if any."""
+    for size in (5, 4, 3):
+        for i in range(0, len(name) - size + 1):
+            piece = name[i:i + size]
+            if piece.isalpha() and piece in WORDS:
+                return piece
+    return None
+
+
+# What earns a place on the board rather than merely being free.
+#
+# Free names are not scarce and almost none of them are worth having. Measured
+# over 21,069 real five-character finds: not one was digit-free, so nothing
+# reached the letters-only tiers, and not one was patterned either - `rate`
+# alone would have kept everything or nothing. What separates the handful
+# somebody would actually type is a real word surviving inside the name with
+# at most one digit around it: mud5c, d6bug, box8j, 6cowv, 4vhit, 9fixq.
+#
+# That rule kept 29 of the 21,069 - about one in 726 - which is roughly a
+# dozen names from a run that finds ten thousand. Sparse on purpose.
+NOTEWORTHY_TIER = TIERS["solid"]
+NOTEWORTHY_MAX_DIGITS = 1
+
+
+def is_noteworthy(name: str) -> bool:
+    """True for a name worth putting on the board.
+
+    Anything at `solid` or above qualifies on its own - a palindrome, a
+    repeat, or any name that manages to be letters-only. Below that, a name
+    has to read: at most one digit, pronounceable, and carrying a word.
+    """
+    low = name.lower()
+    if rate(low)[1] >= NOTEWORTHY_TIER:
+        return True
+    if sum(c.isdigit() for c in low) > NOTEWORTHY_MAX_DIGITS:
+        return False
+    return _pronounceable(low) and _embedded_word(low) is not None
 
 
 def rate(name: str) -> tuple[str, int]:

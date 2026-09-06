@@ -53,6 +53,7 @@ import signal
 import sys
 import time
 from collections import deque
+from dataclasses import dataclass
 
 import aiohttp
 from rich.live import Live
@@ -77,11 +78,10 @@ from config import (
 )
 from engine import (
     AVAILABLE,
-    ERROR,
-    MALFORMED_CHUNK,
     CENSORED,
-    EXHAUSTED,
+    ERROR,
     INVALID,
+    MALFORMED_CHUNK,
     TAKEN,
     CircuitBreaker,
     RobloxChecker,
@@ -92,7 +92,6 @@ from engine import (
 from proxy import ProxyManager
 from ui import C, banner, console, final_summary, live_card
 from wizard import generate_usernames, setup_wizard
-
 
 # ---------------------------------------------------------------------------
 # CLI
@@ -240,7 +239,7 @@ async def _diag_sampler(stats: Stats, pm, stop_event: asyncio.Event,
         while not stop_event.is_set():
             try:
                 await asyncio.wait_for(stop_event.wait(), DIAG_INTERVAL)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
             now = {f: getattr(stats, f) for f in prev}
             delta = {f: now[f] - prev[f] for f in prev}
@@ -279,6 +278,270 @@ async def _diag_sampler(stats: Stats, pm, stop_event: asyncio.Event,
 MAX_CHUNK_TRIES = 40
 
 
+class _StreamPrinter:
+    """The scrolling per-name log printed above the live panel.
+
+    Rich moves the panel down as lines arrive, so the result is a running log
+    with the stats pinned underneath. Two things keep it cheap enough to leave
+    on by default: styles are pre-built rather than parsed out of markup on
+    every line, and lines are emitted in batches - measured together at
+    ~12,000 lines/sec against ~4,000 for the markup-per-line version this
+    replaced. The batch also flushes on the render tick, so a slow proxyless
+    run still shows each line promptly instead of waiting for the buffer.
+    """
+
+    S_TAKEN = Style(color=C.MUTED, dim=True)
+    S_CENSORED = Style(color=C.WARNING)
+    S_UNKNOWN = Style(color=C.WARNING, dim=True)
+    S_DIM = Style(color=C.MUTED, dim=True)
+    S_NAME = Style(bold=True)
+    S_MARK = Style(color=C.PRIMARY)
+
+    # A hit is the whole point of watching this run, so it does not get a line
+    # like every other outcome - it gets a slab. Reverse video across the full
+    # width is the one treatment that still reads once the terminal has been
+    # shrunk into a phone-sized video frame; a coloured line just becomes a
+    # slightly brighter row in a grey wall.
+    S_SLAB = Style(color="#0B0B0C", bgcolor=C.SUCCESS, bold=True)
+    S_SLAB_TAIL = Style(color=C.SUCCESS, bold=True)
+    SLAB_WIDTH = 52
+    BATCH = 16
+
+    def __init__(self, out, stats: Stats, start_time: float, enabled: bool) -> None:
+        self._out = out
+        self._stats = stats
+        self._start = start_time
+        self._enabled = enabled
+        self._buf: list[Text] = []
+        self._look = {
+            TAKEN:    ("·", "taken",    self.S_TAKEN),
+            CENSORED: ("•", "censored", self.S_CENSORED),
+            INVALID:  ("×", "invalid",  self.S_DIM),
+        }
+
+    def flush(self) -> None:
+        if not self._buf:
+            return
+        self._out.print(Text("\n").join(self._buf))
+        self._buf.clear()
+
+    def _emit(self, line: Text) -> None:
+        self._buf.append(line)
+        if len(self._buf) >= self.BATCH:
+            self.flush()
+
+    def outcome(self, name: str, outcome: str) -> None:
+        """One line for a resolved name."""
+        if not self._enabled:
+            return
+        line = Text(no_wrap=True, end="")
+
+        if outcome == AVAILABLE:
+            line.append(
+                f"  ✦  AVAILABLE   {name}".ljust(self.SLAB_WIDTH), self.S_SLAB,
+            )
+            line.append(
+                f"  #{self._stats.works:,} · {time.time() - self._start:.0f}s ",
+                self.S_SLAB_TAIL,
+            )
+            self._buf.append(line)
+            # Flush immediately: the hit is the moment worth seeing, and
+            # buffering it behind fifteen "taken" lines is what made it land
+            # late on screen.
+            self.flush()
+            return
+
+        icon, label, style = self._look.get(
+            outcome, ("?", "unresolved", self.S_UNKNOWN),
+        )
+        line.append(f" {icon} ", style)
+        # Taken is most of the traffic, so it stays dim and short - the wall
+        # greys out and the hits are what your eye catches.
+        if outcome == TAKEN:
+            line.append(f"{name:<10}", self.S_TAKEN)
+            line.append(label, self.S_TAKEN)
+        else:
+            line.append(f"{name:<10}", self.S_NAME)
+            line.append(f"{label:<11}", style)
+            line.append(
+                f"{time.time() - self._start:6.0f}s "
+                f"{self._stats.rps:>5.0f}/s "
+                f"{self._stats.works:>6,} found",
+                self.S_DIM,
+            )
+        self._emit(line)
+
+    def screened(self, size: int, done: int, total: int) -> None:
+        """One line per stage-1 chunk that came back."""
+        if not self._enabled:
+            return
+        line = Text(no_wrap=True, end="")
+        line.append(" # ", self.S_MARK)
+        line.append(f"screened {size:<4} ", self.S_DIM)
+        line.append(
+            f"{done:>10,}/{total:,}  {self._stats.rps:>5.0f}/s", self.S_DIM,
+        )
+        self._emit(line)
+
+
+@dataclass
+class _Live:
+    """Everything both stages write and the live panel reads.
+
+    The two stages run concurrently, so screening and validation progress are
+    tracked separately and `stage` only decides which of the two the panel is
+    currently showing.
+    """
+
+    stats: Stats
+    stream: _StreamPrinter
+    feed: deque[str]
+    unresolved: list[str]
+    screen_total: int
+    stage: int = 1
+    screened: int = 0
+    validated: int = 0
+    cand_total: int = 0
+
+
+async def _screen_stage(
+    checker: RobloxChecker,
+    session: aiohttp.ClientSession,
+    names: list[str],
+    run: _Live,
+    *,
+    workers: int,
+    on_candidates,
+) -> None:
+    """Stage 1: screen every chunk, publishing survivors as they resolve.
+
+    Survivors go out through *on_candidates* the moment a chunk comes back
+    rather than at the end, so stage 2 can drain them while stage 1 is still
+    going - screening time then hides almost entirely inside validation time.
+    """
+    chunks = [names[i:i + BATCH_MAX] for i in range(0, len(names), BATCH_MAX)]
+    if not chunks:
+        return
+
+    # A chunk that fails screening goes back for another stage-1 attempt
+    # rather than straight to stage 2. Screening a chunk again costs one
+    # request; handing its 200 names to stage 2 costs 200 - so falling back on
+    # the first failure multiplies the load by 200 at exactly the moment the
+    # endpoint is already refusing us, and the extra stage-2 traffic then
+    # makes more chunks fail. A live 4-char run showed it: 8,398 cheap
+    # requests turned into 1.17 million expensive ones.
+    queue = deque((c, 0) for c in chunks)
+    inflight = 0
+    lock = asyncio.Lock()
+
+    async def _take():
+        """Next (chunk, tries), or None once nothing is left."""
+        nonlocal inflight
+        while True:
+            async with lock:
+                if queue:
+                    inflight += 1
+                    return queue.popleft()
+                if inflight == 0:
+                    return None
+            # Chunks are still out; one may come back for a retry, so wait
+            # rather than exiting the worker.
+            await asyncio.sleep(0.05)
+
+    async def _release(retry=None) -> None:
+        nonlocal inflight
+        async with lock:
+            inflight -= 1
+            if retry is not None:
+                queue.append(retry)
+
+    async def _worker() -> None:
+        while True:
+            item = await _take()
+            if item is None:
+                return
+            chunk, tries = item
+            taken_set = await checker.batch_screen(session, chunk)
+
+            if taken_set is None and tries + 1 < MAX_CHUNK_TRIES:
+                await _release((chunk, tries + 1))
+                continue
+
+            await _release()
+            if taken_set is None or taken_set is MALFORMED_CHUNK:
+                # Out of stage-1 attempts, or a chunk the endpoint will never
+                # accept. Stage 2 is the last resort.
+                on_candidates(chunk)
+                run.stats.inc("fellback_chunks")
+                run.feed.append(f"[{C.WARNING}]?[/] chunk -> stage 2")
+            else:
+                free = [n for n in chunk if n.lower() not in taken_set]
+                run.stats.inc_taken(len(chunk) - len(free))
+                on_candidates(free)
+            run.stats.inc("screened", len(chunk))
+            run.screened += len(chunk)
+            run.stream.screened(len(chunk), run.screened, run.screen_total)
+
+    await asyncio.gather(
+        *(_worker() for _ in range(min(len(chunks), max(1, workers))))
+    )
+
+
+async def _validate_stage(
+    checker: RobloxChecker,
+    session: aiohttp.ClientSession,
+    cand_queue: asyncio.Queue[str | None],
+    run: _Live,
+    *,
+    workers: int,
+    on_hit,
+) -> None:
+    """Stage 2: drain the candidate queue until every worker sees a sentinel.
+
+    Workers block on an empty queue, which is what keeps the combined request
+    rate honest early on: they only go wide once there is a backlog to go wide
+    on.
+    """
+
+    async def _worker() -> None:
+        while True:
+            name = await cand_queue.get()
+            if name is None:  # sentinel: screening finished, queue drained
+                return
+            try:
+                outcome, _code = await checker.validate(session, name)
+            except asyncio.CancelledError:
+                # Stopped mid-flight: this name has no answer either, so it
+                # belongs in the retry list rather than nowhere.
+                run.unresolved.append(name)
+                raise
+            except Exception:
+                run.stream.outcome(name, ERROR)
+                run.unresolved.append(name)
+                run.validated += 1
+                continue
+
+            run.stream.outcome(name, outcome)
+
+            if outcome == AVAILABLE:
+                await on_hit(name)
+            elif outcome == TAKEN:
+                run.stats.inc_taken()
+                run.feed.append(f"[{C.DANGER}]-[/] {name}")
+            elif outcome == CENSORED:
+                run.stats.inc("censored")
+                run.feed.append(f"[{C.WARNING}]c[/] {name}")
+            elif outcome == INVALID:
+                run.stats.inc("invalid")
+            else:
+                run.unresolved.append(name)
+                run.feed.append(f"[{C.WARNING}]?[/] {name}")
+
+            run.validated += 1
+
+    await asyncio.gather(*(_worker() for _ in range(workers)))
+
+
 async def _run_checker(
     cfg: RunConfig,
     settings: AppSettings,
@@ -286,7 +549,7 @@ async def _run_checker(
     round_no: int = 1,
     cooldown=None,
     already_checked: set[str] | None = None,
-    stop: "_StopRequest | None" = None,
+    stop: _StopRequest | None = None,
 ) -> int:
     """Two-stage checker with a live display. Returns the hit count.
 
@@ -391,25 +654,23 @@ async def _run_checker(
     # can drain whatever is still queued after an early stop.
     cand_queue: asyncio.Queue[str | None] = asyncio.Queue()
 
-    # Live-display state. Both stages now run concurrently, so screening and
-    # validation progress are tracked separately and `stage` only decides
-    # which of the two the panel is currently showing.
-    state = {
-        "stage": 1,
-        "screened": 0,
-        "screen_total": total_names,
-        "validated": 0,
-        "cand_total": 0,
-    }
+    stream = _StreamPrinter(console, stats, start_time, settings.stream)
+    run = _Live(
+        stats=stats,
+        stream=stream,
+        feed=feed,
+        unresolved=unresolved,
+        screen_total=total_names,
+    )
 
     def _live_render():
         rps_history.append(stats.rps)
-        if state["stage"] == 1:
-            done, total = state["screened"], state["screen_total"]
+        if run.stage == 1:
+            done, total = run.screened, run.screen_total
         else:
-            done, total = state["validated"], state["cand_total"]
+            done, total = run.validated, run.cand_total
         return live_card(
-            stage=state["stage"],
+            stage=run.stage,
             stage_done=done,
             stage_total=total,
             round_no=round_no,
@@ -469,103 +730,6 @@ async def _run_checker(
             # all of stage 1's wall clock was being spent with the validator
             # idle.
             #
-            # Now stage 1 publishes survivors to a queue as each chunk comes
-            # back and stage 2 drains it concurrently, so screening time hides
-            # almost entirely inside validation time. The validators block on
-            # an empty queue, which is also what keeps the combined request
-            # rate honest early on: they only go wide once there is a backlog
-            # to go wide on.
-            # One line per resolved name, printed above the live panel; rich
-            # moves the panel down as lines arrive, so the result is a
-            # scrolling log with the stats pinned underneath.
-            #
-            # Two things keep it cheap enough to leave on by default.
-            # Styles are pre-built rather than parsed out of markup on every
-            # line, and lines are emitted in batches - measured together at
-            # ~12,000 lines/sec against ~4,000 for the markup-per-line
-            # version it replaces. The batch also flushes on the render tick,
-            # so a slow proxyless run still shows each line promptly instead
-            # of waiting for the buffer to fill.
-            _S_HIT = Style(color=C.SUCCESS, bold=True)
-            _S_TAKEN = Style(color=C.MUTED, dim=True)
-            _S_CENSORED = Style(color=C.WARNING)
-            _S_UNKNOWN = Style(color=C.WARNING, dim=True)
-            _S_DIM = Style(color=C.MUTED, dim=True)
-            _S_NAME = Style(bold=True)
-
-            _look = {
-                TAKEN:    ("·", "taken",      _S_TAKEN),
-                CENSORED: ("•", "censored",   _S_CENSORED),
-                INVALID:  ("×", "invalid",    _S_DIM),
-            }
-
-            # A hit is the whole point of watching this run, so it does not
-            # get a line like every other outcome - it gets a slab. Reverse
-            # video across the full width is the one treatment that still
-            # reads once the terminal has been shrunk into a phone-sized
-            # video frame; a coloured line just becomes a slightly brighter
-            # row in a grey wall.
-            _S_SLAB = Style(color="#0B0B0C", bgcolor=C.SUCCESS, bold=True)
-            _S_SLAB_TAIL = Style(color=C.SUCCESS, bold=True)
-            _SLAB_WIDTH = 52
-            _stream_buf: list[Text] = []
-            STREAM_BATCH = 16
-
-            def _stream_flush() -> None:
-                if not _stream_buf:
-                    return
-                live.console.print(Text("\n").join(_stream_buf))
-                _stream_buf.clear()
-
-            def _stream(name: str, outcome: str) -> None:
-                if not settings.stream:
-                    return
-                line = Text(no_wrap=True, end="")
-
-                if outcome == AVAILABLE:
-                    line.append(
-                        f"  ✦  AVAILABLE   {name}".ljust(_SLAB_WIDTH),
-                        _S_SLAB,
-                    )
-                    line.append(
-                        f"  #{stats.works:,} · {time.time() - start_time:.0f}s ",
-                        _S_SLAB_TAIL,
-                    )
-                    _stream_buf.append(line)
-                    # Flush immediately: the hit is the moment worth seeing,
-                    # and buffering it behind fifteen "taken" lines is what
-                    # made it land late on screen.
-                    _stream_flush()
-                    return
-
-                icon, label, style = _look.get(
-                    outcome, ("?", "unresolved", _S_UNKNOWN),
-                )
-                line.append(f" {icon} ", style)
-                # Taken is most of the traffic, so it stays dim and short -
-                # the wall greys out and the hits are what your eye catches.
-                if outcome == TAKEN:
-                    line.append(f"{name:<10}", _S_TAKEN)
-                    line.append(label, _S_TAKEN)
-                else:
-                    line.append(f"{name:<10}", _S_NAME)
-                    line.append(f"{label:<11}", style)
-                    line.append(
-                        f"{time.time() - start_time:6.0f}s "
-                        f"{stats.rps:>5.0f}/s "
-                        f"{stats.works:>6,} found",
-                        _S_DIM,
-                    )
-                _stream_buf.append(line)
-                if len(_stream_buf) >= STREAM_BATCH:
-                    _stream_flush()
-
-            def _enqueue(batch: list[str]) -> None:
-                for n in batch:
-                    cand_queue.put_nowait(n)
-                stats.inc("candidates", len(batch))
-                state["cand_total"] += len(batch)
-
             # Both pools are sized to the full concurrency setting. That is
             # not double the load: `checker` holds a shared semaphore of
             # cfg.concurrency in-flight requests, so the two stages compete
@@ -573,154 +737,53 @@ async def _run_checker(
             # split would starve stage 1 on a low-survival run and stage 2 on
             # a high-survival one.
             n_validators = max(1, cfg.concurrency)
-            screen_tasks: list[asyncio.Task] = []
 
-            if cfg.two_stage:
-                chunks = [names[i:i + BATCH_MAX] for i in range(0, len(names), BATCH_MAX)]
+            def _enqueue(batch: list[str]) -> None:
+                for n in batch:
+                    cand_queue.put_nowait(n)
+                stats.inc("candidates", len(batch))
+                run.cand_total += len(batch)
 
-                # A chunk that fails screening goes back for another stage-1
-                # attempt rather than straight to stage 2. Screening a chunk
-                # again costs one request; handing its 200 names to stage 2
-                # costs 200 - so falling back on the first failure multiplies
-                # the load by 200 at exactly the moment the endpoint is
-                # already refusing us, and the extra stage-2 traffic then
-                # makes more chunks fail. A live 4-char run showed it: 8,398
-                # cheap requests turned into 1.17 million expensive ones.
-                chunk_queue = deque((c, 0) for c in chunks)
-                inflight = 0
-                idx_lock = asyncio.Lock()
-
-                async def _take_chunk():
-                    """Next (chunk, tries), or None once nothing is left."""
-                    nonlocal inflight
-                    while True:
-                        async with idx_lock:
-                            if chunk_queue:
-                                inflight += 1
-                                return chunk_queue.popleft()
-                            if inflight == 0:
-                                return None
-                        # Chunks are still out; one may come back for a retry,
-                        # so wait rather than exiting the worker.
-                        await asyncio.sleep(0.05)
-
-                async def _release(retry=None) -> None:
-                    nonlocal inflight
-                    async with idx_lock:
-                        inflight -= 1
-                        if retry is not None:
-                            chunk_queue.append(retry)
-
-                async def _screen_worker() -> None:
-                    while True:
-                        item = await _take_chunk()
-                        if item is None:
-                            return
-                        chunk, tries = item
-                        taken_set = await checker.batch_screen(session, chunk)
-
-                        if taken_set is None and tries + 1 < MAX_CHUNK_TRIES:
-                            await _release((chunk, tries + 1))
-                            continue
-
-                        await _release()
-                        if taken_set is None or taken_set is MALFORMED_CHUNK:
-                            # Out of stage-1 attempts, or a chunk the endpoint
-                            # will never accept. Stage 2 is the last resort.
-                            _enqueue(chunk)
-                            stats.inc("fellback_chunks")
-                            feed.append(f"[{C.WARNING}]?[/] chunk -> stage 2")
-                        else:
-                            free = [n for n in chunk if n.lower() not in taken_set]
-                            stats.inc_taken(len(chunk) - len(free))
-                            _enqueue(free)
-                        stats.inc("screened", len(chunk))
-                        state["screened"] += len(chunk)
-                        if settings.stream:
-                            _line = Text(no_wrap=True, end="")
-                            _line.append(" # ", Style(color=C.PRIMARY))
-                            _line.append(f"screened {len(chunk):<4} ", _S_DIM)
-                            _line.append(
-                                f"{state['screened']:>10,}/"
-                                f"{state['screen_total']:,}  "
-                                f"{stats.rps:>5.0f}/s",
-                                _S_DIM,
-                            )
-                            _stream_buf.append(_line)
-                            if len(_stream_buf) >= STREAM_BATCH:
-                                _stream_flush()
-
-                n_screeners = min(len(chunks), max(1, cfg.concurrency))
-                screen_tasks = [
-                    asyncio.create_task(_screen_worker())
-                    for _ in range(n_screeners)
-                ]
-            else:
-                # Validator-only mode: every name is a stage-2 candidate.
-                _enqueue(names)
-                state["stage"] = 2
-                state["screened"] = total_names
-
-            async def _validate_worker() -> None:
-                while True:
-                    name = await cand_queue.get()
-                    if name is None:  # sentinel: screening finished, queue drained
-                        return
-                    try:
-                        outcome, code = await checker.validate(session, name)
-                    except asyncio.CancelledError:
-                        # Stopped mid-flight: this name has no answer either,
-                        # so it belongs in the retry list rather than nowhere.
-                        unresolved.append(name)
-                        raise
-                    except Exception:
-                        _stream(name, ERROR)
-                        unresolved.append(name)
-                        state["validated"] += 1
-                        continue
-
-                    _stream(name, outcome)
-
-                    if outcome == AVAILABLE:
-                        await _record_hit(name)
-                    elif outcome == TAKEN:
-                        stats.inc_taken()
-                        feed.append(f"[{C.DANGER}]-[/] {name}")
-                    elif outcome == CENSORED:
-                        stats.inc("censored")
-                        feed.append(f"[{C.WARNING}]c[/] {name}")
-                    elif outcome == INVALID:
-                        stats.inc("invalid")
-                    else:
-                        unresolved.append(name)
-                        feed.append(f"[{C.WARNING}]?[/] {name}")
-
-                    state["validated"] += 1
-
-            vtasks = [
-                asyncio.create_task(_validate_worker())
-                for _ in range(n_validators)
-            ]
-
-            async def _seal_queue() -> None:
-                """Once screening is done, tell the validators when to stop."""
-                if screen_tasks:
-                    await asyncio.gather(*screen_tasks, return_exceptions=True)
-                    # Screening is over, so the panel switches to stage 2 and
-                    # the candidate total is final.
-                    state["stage"] = 2
+            def _seal() -> None:
+                """Tell each validator, once, that no more names are coming."""
                 for _ in range(n_validators):
                     cand_queue.put_nowait(None)
 
-            seal_task = asyncio.create_task(_seal_queue())
+            screen_task: asyncio.Task | None = None
+            if cfg.two_stage:
+                async def _screen_then_seal() -> None:
+                    await _screen_stage(
+                        checker, session, names, run,
+                        workers=cfg.concurrency,
+                        on_candidates=_enqueue,
+                    )
+                    # Screening is over, so the panel switches to stage 2 and
+                    # the candidate total is final.
+                    run.stage = 2
+                    _seal()
 
-            running = [*screen_tasks, *vtasks, seal_task]
+                screen_task = asyncio.create_task(_screen_then_seal())
+            else:
+                # Validator-only mode: every name is a stage-2 candidate.
+                _enqueue(names)
+                run.stage = 2
+                run.screened = total_names
+                _seal()
+
+            validate_task = asyncio.create_task(
+                _validate_stage(
+                    checker, session, cand_queue, run,
+                    workers=n_validators, on_hit=_record_hit,
+                )
+            )
+
+            running = [t for t in (screen_task, validate_task) if t is not None]
             pending = set(running)
             while pending:
                 # asyncio.wait sleeps on the tasks themselves rather than
                 # re-polling `.done()` over every worker four times a second.
                 _, pending = await asyncio.wait(pending, timeout=0.25)
-                _stream_flush()
+                stream.flush()
                 live.update(_live_render())
                 if stop is not None and stop.requested and pending:
                     # Wind down here rather than letting the interrupt unwind
@@ -733,7 +796,7 @@ async def _run_checker(
                     break
             await asyncio.gather(*running, return_exceptions=True)
 
-            _stream_flush()
+            stream.flush()
             live.update(_live_render())
 
     except asyncio.CancelledError:
@@ -746,7 +809,7 @@ async def _run_checker(
             # decaying run - the part worth seeing - is not the part missing.
             try:
                 await asyncio.wait_for(diag_task, timeout=2.0)
-            except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
+            except (TimeoutError, asyncio.CancelledError, Exception):
                 diag_task.cancel()
         if webhook:
             try:

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import json
 import random
 import re
 import string
@@ -62,6 +63,55 @@ def _resolve_input_path(raw: str) -> str:
 _PROXY_RE = re.compile(
     r"^(?:https?://)?(?:[^@\s]+@)?[a-zA-Z0-9](?:[a-zA-Z0-9\-.]*[a-zA-Z0-9])?:\d{1,5}$"
 )
+
+
+def _proxies_from_json(text: str) -> list[str] | None:
+    """host:port pairs out of a JSON body, or None if this is not JSON.
+
+    Most lists are plain lines, but the checked ones tend to publish records
+    instead - geonode's carry uptime, latency and a last-checked timestamp,
+    which is exactly the material worth having. Rather than special-casing one
+    source, anything that parses as JSON and holds objects with an ip and a
+    port is read this way.
+    """
+    try:
+        data = json.loads(text)
+    except (ValueError, TypeError):
+        return None
+    rows = data.get("data") if isinstance(data, dict) else data
+    if not isinstance(rows, list):
+        return None
+    out: list[str] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        host, port = row.get("ip"), row.get("port")
+        if host and port:
+            proxy = _normalise_proxy(f"{host}:{port}")
+            if proxy:
+                out.append(proxy)
+    return out
+
+
+def _normalise_proxy(line: str) -> str | None:
+    """A scraped line as `host:port`, or None if it is not a proxy at all.
+
+    Most lists are already bare `host:port`. Some append fields - hideip.me
+    publishes `host:port:Country` - and dropping those lines loses the source
+    entirely, so the extra fields are trimmed rather than rejected. Anything
+    that still fails the pattern (headers, prose, socks URLs) is discarded.
+    """
+    line = line.strip()
+    if not line:
+        return None
+    if _PROXY_RE.match(line):
+        return line
+    parts = line.split(":")
+    if len(parts) > 2:
+        candidate = ":".join(parts[:2])
+        if _PROXY_RE.match(candidate):
+            return candidate
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -255,18 +305,40 @@ async def _step_proxies(config: Config) -> tuple[list[str], bool, bool]:
 # Step 2: Usernames
 # ---------------------------------------------------------------------------
 
+def _underscored(stem: str) -> str:
+    """*stem* with an underscore at a random interior position.
+
+    The underscore takes one of the name's characters rather than being added
+    to them, so a stem of n characters becomes a name of n+1 and the caller
+    passes a stem one shorter than the length it wants. Roblox counts the
+    underscore against its own 3-20 limit, and asking for five characters and
+    receiving six is not what anyone means by it.
+    """
+    pos = random.randint(1, len(stem) - 1)
+    return stem[:pos] + "_" + stem[pos:]
+
+
 def _generate(length: int, count: int, allow_underscore: bool) -> list[str]:
-    """Generate valid Roblox usernames of *length* characters."""
+    """Generate valid Roblox usernames of exactly *length* characters."""
     total_space = len(GEN_CHARS) ** length
 
     # Small enough to enumerate exhaustively, then sample.
     if total_space <= 2_000_000:
         combos = ["".join(c) for c in itertools.product(GEN_CHARS, repeat=length)]
         if allow_underscore and length >= 3:
-            # Insert a single underscore at every interior position.
-            base = combos[: min(len(combos), 200_000)]
-            for pos in range(1, length):
-                combos.extend(n[:pos] + "_" + n[pos:] for n in base[:20_000])
+            # An underscore name of this length is a stem one character
+            # shorter with a separator dropped into it, so its own space is
+            # enumerated rather than carved out of the plain one.
+            #
+            # The stems are drawn at random, which the old code did not do:
+            # it sliced the first 20,000 entries off a lexicographic product,
+            # and since 36^3 = 46,656 four-character names begin with each
+            # letter, every single underscore name it produced at length 4
+            # started with an "a". Length 3 was biased the same way, just
+            # less visibly - it never got past "p".
+            stems = ["".join(c) for c in
+                     itertools.product(GEN_CHARS, repeat=length - 1)]
+            combos.extend(_underscored(stem) for stem in stems)
         combos = [c for c in combos if is_valid_username(c)]
         return random.sample(combos, min(count, len(combos)))
 
@@ -276,11 +348,10 @@ def _generate(length: int, count: int, allow_underscore: bool) -> list[str]:
     attempts = 0
     while len(out) < count and attempts < count * 50:
         attempts += 1
-        cand = "".join(random.choices(GEN_CHARS, k=length))
-        if allow_underscore and random.random() < 0.15 and length >= 3:
-            pos = random.randint(1, length - 1)
-            cand = cand[:pos] + "_" + cand[pos:]
-            cand = cand[:20]
+        if allow_underscore and length >= 3 and random.random() < 0.15:
+            cand = _underscored("".join(random.choices(GEN_CHARS, k=length - 1)))
+        else:
+            cand = "".join(random.choices(GEN_CHARS, k=length))
         if cand not in seen and is_valid_username(cand):
             seen.add(cand)
             out.append(cand)
@@ -371,7 +442,7 @@ def _step_speed(proxies: list[str], scraped: bool = False) -> tuple[int, int, bo
     """Returns (concurrency, timeout, two_stage)."""
 
     two_stage = Confirm.ask(
-        f"Use fast 2-stage mode? [dim](200 names/request screen, then confirm)[/]",
+        "Use fast 2-stage mode? [dim](200 names/request screen, then confirm)[/]",
         default=True,
     )
     if not two_stage:
@@ -509,24 +580,161 @@ async def _prescreen_proxies(pool: list[str]) -> list[str]:
 # Proxy scraper
 # ---------------------------------------------------------------------------
 
+# The unchecked dumps. Between them they are ~97% of everything the scrape
+# returns, so a uniform sample down to the cap below would be ~97% unchecked
+# and would crowd out the curated lists - the ones that publish only proxies
+# they have already validated, and that therefore survive the pre-flight
+# screen at a far better rate. Every other source is kept whole; these
+# contribute a fixed BULK_SAMPLE on top.
+BULK_SOURCES = {
+    "mishakorzik", "casals-ar", "SevenworksDev", "MuRongPIG",
+    "ErcinDedeoglu", "zevtyardt", "yuceltoluyag",
+}
+
+# How many of the unchecked dumps to screen alongside the curated lists.
+#
+# Everything curated goes through; the dumps add this many on top rather than
+# competing with them for one fixed total. That distinction matters: with a
+# single cap, adding a curated source silently squeezed the hedge, and it hit
+# zero twice while these sources were being assembled - 23,045 curated against
+# a 25,000 cap, then 32,593 against 30,000, each time leaving the dumps
+# fetching 1.9 million lines for no slots at all.
+BULK_SAMPLE = 7_000
+
+# Hard ceiling on the whole pool, and the only thing here that is really about
+# time. The pre-flight screen is the expensive step - the scrape itself takes
+# about four seconds - and it costs up to PRESCREEN_TIMEOUT per proxy at
+# PRESCREEN_CONCURRENCY at a time, so a pool of N takes roughly N/120 seconds.
+# At the current ~32,600 curated plus the hedge that is around five and a half
+# minutes; the ceiling only bites if the curated lists grow far beyond that.
+SCRAPE_POOL_CAP = 45_000
+
+
+def _select_pool(
+    batches: dict[str, list[str]],
+    cap: int = SCRAPE_POOL_CAP,
+    bulk_sample: int = BULK_SAMPLE,
+) -> tuple[list[str], int, int]:
+    """Dedupe across sources and pick the pool. Returns (pool, unique, curated).
+
+    `batches` maps source name to what that source returned, in SOURCES order.
+    Curated sources are consumed first, so a proxy that appears in both a
+    curated list and a bulk dump is credited to the curated one; every curated
+    proxy is then kept. The dumps contribute *bulk_sample* on top of that, not
+    whatever a shared total happens to leave them, so adding a curated source
+    grows the pool rather than quietly starving the hedge. `cap` is only a
+    ceiling for the pathological case.
+    """
+    seen: set[str] = set()
+    curated: list[str] = []
+    bulk: list[str] = []
+
+    def _take(name: str, into: list[str]) -> None:
+        for proxy in batches.get(name, ()):
+            key = proxy.split("@")[-1] if "@" in proxy else proxy
+            if key not in seen:
+                seen.add(key)
+                into.append(proxy)
+
+    for name in batches:
+        if name not in BULK_SOURCES:
+            _take(name, curated)
+    for name in batches:
+        if name in BULK_SOURCES:
+            _take(name, bulk)
+
+    total = len(curated) + len(bulk)
+    if len(curated) >= cap:
+        random.shuffle(curated)
+        pool = curated[:cap]
+    elif bulk:
+        random.shuffle(bulk)
+        pool = curated + bulk[:min(bulk_sample, cap - len(curated))]
+    else:
+        pool = curated
+    return pool, total, min(len(curated), len(pool))
+
+
 async def _scrape_proxies() -> list[str]:
     """Fetch free HTTP proxies from multiple sources, deduplicate."""
 
+    # Every URL here was probed before it was added: it answers 200 and its
+    # body parses as host:port. Two dead ones (mmpx12 http/https, both 404)
+    # were dropped at the same time. Protocol matters - aiohttp's proxy=
+    # speaks HTTP CONNECT, so socks lists are deliberately not here even
+    # though they parse.
     SOURCES = [
-        ("TheSpeedX",       "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt"),
-        ("monosans",        "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt"),
-        ("proxifly",        "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/http/data.txt"),
-        ("ShiftyTR-http",   "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt"),
-        ("ShiftyTR-https",  "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/https.txt"),
-        ("roosterkid",      "https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS_RAW.txt"),
-        ("sunny9577",       "https://raw.githubusercontent.com/sunny9577/proxy-scraper/master/generated/http_proxies.txt"),
-        ("rdavydov",        "https://raw.githubusercontent.com/rdavydov/proxy-list/main/proxies/http.txt"),
-        ("mmpx12-http",     "https://raw.githubusercontent.com/mmpx12/proxy-list/master/http.txt"),
-        ("mmpx12-https",    "https://raw.githubusercontent.com/mmpx12/proxy-list/master/https.txt"),
-        ("iplocate-http",   "https://raw.githubusercontent.com/iplocate/free-proxy-list/main/protocols/http.txt"),
-        ("iplocate-https",  "https://raw.githubusercontent.com/iplocate/free-proxy-list/main/protocols/https.txt"),
+        # The big four. Unchecked dumps, so the hit rate is poor, but between
+        # them they are ~95% of everything the scrape returns.
+        ("SevenworksDev",   "https://raw.githubusercontent.com/SevenworksDev/proxy-list/main/proxies/http.txt"),
+        ("MuRongPIG",       "https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/http.txt"),
+        ("ErcinDedeoglu",   "https://raw.githubusercontent.com/ErcinDedeoglu/proxies/main/proxies/http.txt"),
+        ("zevtyardt",       "https://raw.githubusercontent.com/zevtyardt/proxy-list/main/http.txt"),
+        ("mishakorzik",     "https://raw.githubusercontent.com/mishakorzik/Free-Proxy/master/proxy.txt"),
+        ("casals-ar",       "https://raw.githubusercontent.com/casals-ar/proxy-list/main/http"),
+        ("yuceltoluyag",    "https://raw.githubusercontent.com/yuceltoluyag/GoodProxy/main/raw.txt"),
+        # Mid-sized, and several of these are checked lists, so proportionally
+        # more of them survive the pre-flight screen.
         ("openproxylist",   "https://api.openproxylist.xyz/http.txt"),
+        ("aslisk",          "https://raw.githubusercontent.com/aslisk/proxyhttps/main/https.txt"),
+        ("proxyspace",      "https://proxyspace.pro/http.txt"),
+        ("B4RC0DE",         "https://raw.githubusercontent.com/B4RC0DE-TM/proxy-list/main/HTTP.txt"),
+        ("TheSpeedX",       "https://raw.githubusercontent.com/TheSpeedX/PROXY-List/master/http.txt"),
+        ("sunny9577",       "https://raw.githubusercontent.com/sunny9577/proxy-scraper/master/generated/http_proxies.txt"),
+        ("jetkai",          "https://raw.githubusercontent.com/jetkai/proxy-list/main/online-proxies/txt/proxies-http.txt"),
         ("proxyscrape",     "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=10000&country=all&ssl=all&anonymity=all"),
+        ("proxyscrape-v4",  "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=http&proxy_format=ipport&format=text"),
+        ("iplocate-http",   "https://raw.githubusercontent.com/iplocate/free-proxy-list/main/protocols/http.txt"),
+        ("proxifly",        "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/protocols/http/data.txt"),
+        ("rdavydov",        "https://raw.githubusercontent.com/rdavydov/proxy-list/main/proxies/http.txt"),
+        ("vakhov",          "https://raw.githubusercontent.com/vakhov/fresh-proxy-list/master/http.txt"),
+        ("almroot",         "https://raw.githubusercontent.com/almroot/proxylist/master/list.txt"),
+        ("elliottophellia", "https://raw.githubusercontent.com/elliottophellia/yakumo/master/results/http/global/http_checked.txt"),
+        ("monosans",        "https://raw.githubusercontent.com/monosans/proxy-list/main/proxies/http.txt"),
+        ("clarketm",        "https://raw.githubusercontent.com/clarketm/proxy-list/master/proxy-list-raw.txt"),
+        ("Zaeem20",         "https://raw.githubusercontent.com/Zaeem20/FREE_PROXIES_LIST/master/http.txt"),
+        ("TuanMinPay",      "https://raw.githubusercontent.com/TuanMinPay/live-proxy/master/http.txt"),
+        ("dpangestuw",      "https://raw.githubusercontent.com/dpangestuw/Free-Proxy/main/http_proxies.txt"),
+        ("Anonym0us",       "https://raw.githubusercontent.com/Anonym0usWork1221/Free-Proxies/main/proxy_files/http_proxies.txt"),
+        ("sunny9577-all",   "https://raw.githubusercontent.com/sunny9577/proxy-scraper/master/proxies.txt"),
+        ("Vann-Dev",        "https://raw.githubusercontent.com/Vann-Dev/proxy-list/main/proxies/http.txt"),
+        ("zloi-https",      "https://raw.githubusercontent.com/zloi-user/hideip.me/main/https.txt"),
+        ("proxylist-to",    "https://raw.githubusercontent.com/proxylist-to/proxy-list/main/http.txt"),
+        ("hendrikbgr",      "https://raw.githubusercontent.com/hendrikbgr/Free-Proxy-Repo/master/proxy_list.txt"),
+        ("andigwandi",      "https://raw.githubusercontent.com/andigwandi/free-proxy/main/proxy_list.txt"),
+        ("themiralay",      "https://raw.githubusercontent.com/themiralay/Proxy-List-World/master/data.txt"),
+        ("im-razvan",       "https://raw.githubusercontent.com/im-razvan/proxy_list/main/http.txt"),
+        ("rdavydov-anon",   "https://raw.githubusercontent.com/rdavydov/proxy-list/main/proxies_anonymous/http.txt"),
+        ("zloi-http",       "https://raw.githubusercontent.com/zloi-user/hideip.me/main/http.txt"),
+        ("vmheaven",        "https://raw.githubusercontent.com/vmheaven/VMHeaven-Free-Proxy-Updated/main/http.txt"),
+        ("databay-labs",    "https://raw.githubusercontent.com/databay-labs/free-proxy-list/master/http.txt"),
+        ("openproxy-https", "https://api.openproxylist.xyz/https.txt"),
+        ("proxyscrape-v4s", "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=https&proxy_format=ipport&format=text"),
+        ("ShiftyTR-all",    "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/proxy.txt"),
+        ("zloi-connect",    "https://raw.githubusercontent.com/zloi-user/hideip.me/main/connect.txt"),
+        ("ALIILAPRO",       "https://raw.githubusercontent.com/ALIILAPRO/Proxy/main/http.txt"),
+        ("proxifly-US",     "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/countries/US/data.txt"),
+        ("MrMarble",        "https://raw.githubusercontent.com/MrMarble/proxy-list/main/all.txt"),
+        ("proxyscrape-elite", "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=5000&country=all&ssl=all&anonymity=elite"),
+        ("berkay-digital",  "https://raw.githubusercontent.com/berkay-digital/Proxy-Scraper/main/proxies.txt"),
+        ("proxyspace-https", "https://proxyspace.pro/https.txt"),
+        ("MuRongPIG-check", "https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/http_checked.txt"),
+        ("Firdoxx",         "https://raw.githubusercontent.com/Firdoxx/proxy-list/main/http"),
+        ("prxchk-all",      "https://raw.githubusercontent.com/prxchk/proxy-list/main/all.txt"),
+        ("proxyscrape-anon", "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=5000&country=all&ssl=all&anonymity=anonymous"),
+        # Publishes records rather than lines, read by _proxies_from_json.
+        # Small, but every entry carries a last-checked time, a latency and an
+        # uptime percentage - the only source here that has been verified by
+        # anyone before it arrives.
+        ("geonode",         "https://proxylist.geonode.com/api/proxy-list?limit=500&page=1&sort_by=lastChecked&sort_type=desc&protocols=http"),
+        ("geonode-p2",      "https://proxylist.geonode.com/api/proxy-list?limit=500&page=2&sort_by=lastChecked&sort_type=desc&protocols=http"),
+        # Small and mostly stale, but they cost one request each and the
+        # occasional live proxy in them is one the big dumps missed.
+        ("roosterkid",      "https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS_RAW.txt"),
+        ("prxchk",          "https://raw.githubusercontent.com/prxchk/proxy-list/main/http.txt"),
+        ("ShiftyTR-http",   "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/http.txt"),
+        ("iplocate-https",  "https://raw.githubusercontent.com/iplocate/free-proxy-list/main/protocols/https.txt"),
+        ("ShiftyTR-https",  "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/https.txt"),
     ]
 
     console.print(f"[{C.MUTED}]Scraping {len(SOURCES)} sources...[/]")
@@ -540,8 +748,14 @@ async def _scrape_proxies() -> list[str]:
                     if resp.status != 200:
                         console.print(f"  [{C.DANGER}]X[/] {name} HTTP {resp.status}")
                         return []
-                    text = await resp.text()
-                    found = [p.strip() for p in text.splitlines() if _PROXY_RE.match(p.strip())]
+                    # Decode leniently. At least one list carries country
+                    # names in a non-UTF-8 encoding, and resp.text() raising
+                    # on those threw away the whole source silently.
+                    text = (await resp.read()).decode("utf-8", errors="ignore")
+                    found = _proxies_from_json(text)
+                    if found is None:
+                        found = [q for q in map(_normalise_proxy, text.splitlines())
+                                 if q]
                     console.print(f"  [{C.SUCCESS}]OK[/] {name} {len(found)} proxies")
                     return found
         except Exception as e:
@@ -549,19 +763,17 @@ async def _scrape_proxies() -> list[str]:
             return []
 
     results = await asyncio.gather(*[_fetch_one(n, u) for n, u in SOURCES])
+    by_source = dict(zip((n for n, _ in SOURCES), results, strict=True))
 
-    seen: set[str] = set()
-    all_proxies: list[str] = []
-    for batch in results:
-        for p in batch:
-            key = p.split("@")[-1] if "@" in p else p
-            if key not in seen:
-                seen.add(key)
-                all_proxies.append(p)
-
-    if not all_proxies:
+    pool, total, kept_curated = _select_pool(by_source)
+    if not pool:
         fail("All sources failed - no proxies.")
         return []
 
-    ok(f"{len(all_proxies)} unique proxies [{C.MUTED}](~2-5% usually work)[/]")
-    return all_proxies
+    if len(pool) < total:
+        ok(f"{len(pool):,} of {total:,} unique proxies "
+           f"[{C.MUTED}]({kept_curated:,} curated + "
+           f"{len(pool) - kept_curated:,} sampled; a few % usually work)[/]")
+    else:
+        ok(f"{total:,} unique proxies [{C.MUTED}](a few % usually work)[/]")
+    return pool
