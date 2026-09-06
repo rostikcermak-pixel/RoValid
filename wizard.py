@@ -276,18 +276,40 @@ async def _step_proxies(config: Config) -> tuple[list[str], bool, bool]:
 # Step 2: Usernames
 # ---------------------------------------------------------------------------
 
+def _underscored(stem: str) -> str:
+    """*stem* with an underscore at a random interior position.
+
+    The underscore takes one of the name's characters rather than being added
+    to them, so a stem of n characters becomes a name of n+1 and the caller
+    passes a stem one shorter than the length it wants. Roblox counts the
+    underscore against its own 3-20 limit, and asking for five characters and
+    receiving six is not what anyone means by it.
+    """
+    pos = random.randint(1, len(stem) - 1)
+    return stem[:pos] + "_" + stem[pos:]
+
+
 def _generate(length: int, count: int, allow_underscore: bool) -> list[str]:
-    """Generate valid Roblox usernames of *length* characters."""
+    """Generate valid Roblox usernames of exactly *length* characters."""
     total_space = len(GEN_CHARS) ** length
 
     # Small enough to enumerate exhaustively, then sample.
     if total_space <= 2_000_000:
         combos = ["".join(c) for c in itertools.product(GEN_CHARS, repeat=length)]
         if allow_underscore and length >= 3:
-            # Insert a single underscore at every interior position.
-            base = combos[: min(len(combos), 200_000)]
-            for pos in range(1, length):
-                combos.extend(n[:pos] + "_" + n[pos:] for n in base[:20_000])
+            # An underscore name of this length is a stem one character
+            # shorter with a separator dropped into it, so its own space is
+            # enumerated rather than carved out of the plain one.
+            #
+            # The stems are drawn at random, which the old code did not do:
+            # it sliced the first 20,000 entries off a lexicographic product,
+            # and since 36^3 = 46,656 four-character names begin with each
+            # letter, every single underscore name it produced at length 4
+            # started with an "a". Length 3 was biased the same way, just
+            # less visibly - it never got past "p".
+            stems = ["".join(c) for c in
+                     itertools.product(GEN_CHARS, repeat=length - 1)]
+            combos.extend(_underscored(stem) for stem in stems)
         combos = [c for c in combos if is_valid_username(c)]
         return random.sample(combos, min(count, len(combos)))
 
@@ -297,11 +319,10 @@ def _generate(length: int, count: int, allow_underscore: bool) -> list[str]:
     attempts = 0
     while len(out) < count and attempts < count * 50:
         attempts += 1
-        cand = "".join(random.choices(GEN_CHARS, k=length))
-        if allow_underscore and random.random() < 0.15 and length >= 3:
-            pos = random.randint(1, length - 1)
-            cand = cand[:pos] + "_" + cand[pos:]
-            cand = cand[:20]
+        if allow_underscore and length >= 3 and random.random() < 0.15:
+            cand = _underscored("".join(random.choices(GEN_CHARS, k=length - 1)))
+        else:
+            cand = "".join(random.choices(GEN_CHARS, k=length))
         if cand not in seen and is_valid_username(cand):
             seen.add(cand)
             out.append(cand)
