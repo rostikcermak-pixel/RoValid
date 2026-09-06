@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import itertools
+import json
 import random
 import re
 import string
@@ -62,6 +63,34 @@ def _resolve_input_path(raw: str) -> str:
 _PROXY_RE = re.compile(
     r"^(?:https?://)?(?:[^@\s]+@)?[a-zA-Z0-9](?:[a-zA-Z0-9\-.]*[a-zA-Z0-9])?:\d{1,5}$"
 )
+
+
+def _proxies_from_json(text: str) -> list[str] | None:
+    """host:port pairs out of a JSON body, or None if this is not JSON.
+
+    Most lists are plain lines, but the checked ones tend to publish records
+    instead - geonode's carry uptime, latency and a last-checked timestamp,
+    which is exactly the material worth having. Rather than special-casing one
+    source, anything that parses as JSON and holds objects with an ip and a
+    port is read this way.
+    """
+    try:
+        data = json.loads(text)
+    except (ValueError, TypeError):
+        return None
+    rows = data.get("data") if isinstance(data, dict) else data
+    if not isinstance(rows, list):
+        return None
+    out: list[str] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        host, port = row.get("ip"), row.get("port")
+        if host and port:
+            proxy = _normalise_proxy(f"{host}:{port}")
+            if proxy:
+                out.append(proxy)
+    return out
 
 
 def _normalise_proxy(line: str) -> str | None:
@@ -562,37 +591,39 @@ BULK_SOURCES = {
     "ErcinDedeoglu", "zevtyardt", "yuceltoluyag",
 }
 
-# How many scraped proxies are worth keeping before the pre-flight screen.
+# How many of the unchecked dumps to screen alongside the curated lists.
 #
-# The screen is the expensive step, not the scrape. The scrape itself takes
-# about a second; the screen costs up to PRESCREEN_TIMEOUT seconds per proxy
-# at PRESCREEN_CONCURRENCY at a time, so screening N of them is roughly
-# N / (600/5) seconds. At this cap that is around three minutes, against the
-# many hours if the ~1,170,000 unique proxies the sources return between them
-# all went through.
-#
-# The value has to clear the curated sources (~23,000 of the total) with room
-# left over, or the dumps below contribute nothing at all and there is no
-# point fetching them. At 30,000 they keep roughly 7,000 slots, which is the
-# hedge against the curated lists being stale on any given day.
-#
-# Capping costs little. Free lists run at a few percent live, so this still
-# leaves a few hundred working proxies, and the measured throughput curve
-# flattens well before that - 400 proxies clear 20,000 names in 18 seconds,
-# and past roughly one worker per proxy the extra capacity just queues.
-SCRAPE_POOL_CAP = 30_000
+# Everything curated goes through; the dumps add this many on top rather than
+# competing with them for one fixed total. That distinction matters: with a
+# single cap, adding a curated source silently squeezed the hedge, and it hit
+# zero twice while these sources were being assembled - 23,045 curated against
+# a 25,000 cap, then 32,593 against 30,000, each time leaving the dumps
+# fetching 1.9 million lines for no slots at all.
+BULK_SAMPLE = 7_000
+
+# Hard ceiling on the whole pool, and the only thing here that is really about
+# time. The pre-flight screen is the expensive step - the scrape itself takes
+# about four seconds - and it costs up to PRESCREEN_TIMEOUT per proxy at
+# PRESCREEN_CONCURRENCY at a time, so a pool of N takes roughly N/120 seconds.
+# At the current ~32,600 curated plus the hedge that is around five and a half
+# minutes; the ceiling only bites if the curated lists grow far beyond that.
+SCRAPE_POOL_CAP = 45_000
 
 
 def _select_pool(
-    batches: dict[str, list[str]], cap: int = SCRAPE_POOL_CAP,
+    batches: dict[str, list[str]],
+    cap: int = SCRAPE_POOL_CAP,
+    bulk_sample: int = BULK_SAMPLE,
 ) -> tuple[list[str], int, int]:
-    """Dedupe across sources and trim to *cap*. Returns (pool, unique, curated).
+    """Dedupe across sources and pick the pool. Returns (pool, unique, curated).
 
     `batches` maps source name to what that source returned, in SOURCES order.
     Curated sources are consumed first, so a proxy that appears in both a
-    curated list and a bulk dump is credited to the curated one and survives
-    the sampling. Only the bulk half is sampled, and only by however much the
-    cap has left after the curated sources are in.
+    curated list and a bulk dump is credited to the curated one; every curated
+    proxy is then kept. The dumps contribute *bulk_sample* on top of that, not
+    whatever a shared total happens to leave them, so adding a curated source
+    grows the pool rather than quietly starving the hedge. `cap` is only a
+    ceiling for the pathological case.
     """
     seen: set[str] = set()
     curated: list[str] = []
@@ -618,7 +649,7 @@ def _select_pool(
         pool = curated[:cap]
     elif bulk:
         random.shuffle(bulk)
-        pool = curated + bulk[:cap - len(curated)]
+        pool = curated + bulk[:min(bulk_sample, cap - len(curated))]
     else:
         pool = curated
     return pool, total, min(len(curated), len(pool))
@@ -675,6 +706,28 @@ async def _scrape_proxies() -> list[str]:
         ("im-razvan",       "https://raw.githubusercontent.com/im-razvan/proxy_list/main/http.txt"),
         ("rdavydov-anon",   "https://raw.githubusercontent.com/rdavydov/proxy-list/main/proxies_anonymous/http.txt"),
         ("zloi-http",       "https://raw.githubusercontent.com/zloi-user/hideip.me/main/http.txt"),
+        ("vmheaven",        "https://raw.githubusercontent.com/vmheaven/VMHeaven-Free-Proxy-Updated/main/http.txt"),
+        ("databay-labs",    "https://raw.githubusercontent.com/databay-labs/free-proxy-list/master/http.txt"),
+        ("openproxy-https", "https://api.openproxylist.xyz/https.txt"),
+        ("proxyscrape-v4s", "https://api.proxyscrape.com/v4/free-proxy-list/get?request=display_proxies&protocol=https&proxy_format=ipport&format=text"),
+        ("ShiftyTR-all",    "https://raw.githubusercontent.com/ShiftyTR/Proxy-List/master/proxy.txt"),
+        ("zloi-connect",    "https://raw.githubusercontent.com/zloi-user/hideip.me/main/connect.txt"),
+        ("ALIILAPRO",       "https://raw.githubusercontent.com/ALIILAPRO/Proxy/main/http.txt"),
+        ("proxifly-US",     "https://raw.githubusercontent.com/proxifly/free-proxy-list/main/proxies/countries/US/data.txt"),
+        ("MrMarble",        "https://raw.githubusercontent.com/MrMarble/proxy-list/main/all.txt"),
+        ("proxyscrape-elite", "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=5000&country=all&ssl=all&anonymity=elite"),
+        ("berkay-digital",  "https://raw.githubusercontent.com/berkay-digital/Proxy-Scraper/main/proxies.txt"),
+        ("proxyspace-https", "https://proxyspace.pro/https.txt"),
+        ("MuRongPIG-check", "https://raw.githubusercontent.com/MuRongPIG/Proxy-Master/main/http_checked.txt"),
+        ("Firdoxx",         "https://raw.githubusercontent.com/Firdoxx/proxy-list/main/http"),
+        ("prxchk-all",      "https://raw.githubusercontent.com/prxchk/proxy-list/main/all.txt"),
+        ("proxyscrape-anon", "https://api.proxyscrape.com/v2/?request=displayproxies&protocol=http&timeout=5000&country=all&ssl=all&anonymity=anonymous"),
+        # Publishes records rather than lines, read by _proxies_from_json.
+        # Small, but every entry carries a last-checked time, a latency and an
+        # uptime percentage - the only source here that has been verified by
+        # anyone before it arrives.
+        ("geonode",         "https://proxylist.geonode.com/api/proxy-list?limit=500&page=1&sort_by=lastChecked&sort_type=desc&protocols=http"),
+        ("geonode-p2",      "https://proxylist.geonode.com/api/proxy-list?limit=500&page=2&sort_by=lastChecked&sort_type=desc&protocols=http"),
         # Small and mostly stale, but they cost one request each and the
         # occasional live proxy in them is one the big dumps missed.
         ("roosterkid",      "https://raw.githubusercontent.com/roosterkid/openproxylist/main/HTTPS_RAW.txt"),
@@ -699,7 +752,10 @@ async def _scrape_proxies() -> list[str]:
                     # names in a non-UTF-8 encoding, and resp.text() raising
                     # on those threw away the whole source silently.
                     text = (await resp.read()).decode("utf-8", errors="ignore")
-                    found = [q for q in map(_normalise_proxy, text.splitlines()) if q]
+                    found = _proxies_from_json(text)
+                    if found is None:
+                        found = [q for q in map(_normalise_proxy, text.splitlines())
+                                 if q]
                     console.print(f"  [{C.SUCCESS}]OK[/] {name} {len(found)} proxies")
                     return found
         except Exception as e:

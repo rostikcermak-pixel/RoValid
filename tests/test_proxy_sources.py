@@ -9,7 +9,14 @@ would crowd out the curated lists that publish only validated proxies.
 
 import pytest
 
-from wizard import BULK_SOURCES, SCRAPE_POOL_CAP, _normalise_proxy, _select_pool
+from wizard import (
+    BULK_SAMPLE,
+    BULK_SOURCES,
+    SCRAPE_POOL_CAP,
+    _normalise_proxy,
+    _proxies_from_json,
+    _select_pool,
+)
 
 
 def addrs(prefix, n):
@@ -40,14 +47,25 @@ def test_everything_is_kept_when_it_fits_under_the_cap():
     assert curated == 10
 
 
-def test_curated_sources_survive_the_cap_and_dumps_are_sampled():
+def test_curated_sources_survive_and_dumps_are_sampled():
     batches = {"curated": addrs(1, 50), "SevenworksDev": addrs(2, 5_000)}
-    pool, total, curated = _select_pool(batches, cap=100)
+    pool, total, curated = _select_pool(batches, cap=100, bulk_sample=50)
     assert len(pool) == 100
     assert total == 5_050
     assert curated == 50
-    # Every curated proxy is present; the rest of the budget came from the dump.
+    # Every curated proxy is present; the rest came from the dump.
     assert set(addrs(1, 50)) <= set(pool)
+
+
+def test_adding_curated_sources_does_not_starve_the_hedge():
+    # The bug this shape exists to prevent. Under one shared total, curated
+    # growth ate the dumps' slice until it hit zero - twice, while the sources
+    # were being assembled. The hedge is now added on top, not carved out.
+    small = {"curated": addrs(1, 100), "MuRongPIG": addrs(2, 9_000)}
+    big = {"curated": addrs(1, 9_000), "MuRongPIG": addrs(2, 9_000)}
+    for batches in (small, big):
+        pool, _, curated = _select_pool(batches, cap=10**6, bulk_sample=500)
+        assert len(pool) - curated == 500, "hedge was squeezed"
 
 
 def test_a_proxy_in_both_a_dump_and_a_curated_list_counts_as_curated():
@@ -58,9 +76,9 @@ def test_a_proxy_in_both_a_dump_and_a_curated_list_counts_as_curated():
     assert shared in pool
 
 
-def test_curated_alone_overflowing_the_cap_is_sampled_not_truncated_to_zero():
+def test_curated_alone_overflowing_the_ceiling_is_sampled_not_truncated_to_zero():
     # This is the case that produced a negative "sampled" count: curated
-    # already exceeds the cap, so the dumps contribute nothing at all.
+    # already exceeds the ceiling, so the dumps contribute nothing at all.
     batches = {"curated": addrs(1, 500), "zevtyardt": addrs(2, 500)}
     pool, total, curated = _select_pool(batches, cap=100)
     assert len(pool) == 100
@@ -74,7 +92,8 @@ def test_no_sources_yields_nothing():
 
 
 def test_only_dumps_still_produces_a_pool():
-    pool, total, curated = _select_pool({"MuRongPIG": addrs(1, 500)}, cap=50)
+    pool, total, curated = _select_pool(
+        {"MuRongPIG": addrs(1, 500)}, cap=50, bulk_sample=50)
     assert len(pool) == 50
     assert total == 500
     assert curated == 0
@@ -91,10 +110,40 @@ def test_every_bulk_source_is_actually_a_configured_source(name):
     assert f'("{name}",' in src, f"{name} is in BULK_SOURCES but not in SOURCES"
 
 
-def test_the_cap_leaves_room_for_the_dumps():
-    # If the cap ever drops below what the curated sources alone return,
-    # fetching the dumps is wasted work. Measured: ~23,000 curated.
-    assert SCRAPE_POOL_CAP > 23_000
+def test_the_ceiling_clears_the_curated_sources_plus_the_hedge():
+    # If the ceiling ever drops below what the curated lists alone return,
+    # fetching 1.9 million lines of dumps buys nothing. Measured: ~32,600
+    # curated across 54 sources.
+    assert SCRAPE_POOL_CAP > 32_600 + BULK_SAMPLE
+
+
+# ── JSON bodies ────────────────────────────────────────────────────────────
+
+def test_json_records_are_read_as_host_port():
+    body = ('{"data":[{"ip":"1.2.3.4","port":"8080","anonymityLevel":"elite"},'
+            '{"ip":"5.6.7.8","port":3128}]}')
+    assert _proxies_from_json(body) == ["1.2.3.4:8080", "5.6.7.8:3128"]
+
+
+def test_a_bare_json_list_works_too():
+    assert _proxies_from_json('[{"ip":"9.9.9.9","port":80}]') == ["9.9.9.9:80"]
+
+
+@pytest.mark.parametrize("body", [
+    "1.2.3.4:8080\n5.6.7.8:3128",     # a normal line-based list
+    "not json at all",
+    "",
+    "null",
+    '{"data":"not a list"}',
+])
+def test_non_json_bodies_fall_through_to_line_parsing(body):
+    assert _proxies_from_json(body) is None
+
+
+def test_json_rows_missing_an_ip_or_port_are_skipped():
+    body = ('{"data":[{"ip":"1.2.3.4"},{"port":8080},{"ip":"","port":80},'
+            '{"ip":"1.1.1.1","port":8080},"a string"]}')
+    assert _proxies_from_json(body) == ["1.1.1.1:8080"]
 
 
 # ── line parsing ───────────────────────────────────────────────────────────

@@ -280,20 +280,29 @@ grinding tens of thousands of names.
 **If stage 2 has more than ~100 candidates, use proxies.** Each proxy carries
 its own rate-limit bucket, and that is the only thing that lifts this ceiling.
 
-The scrape pulls from 43 public lists and returns roughly 1,170,000 unique
+The scrape pulls from 61 public lists and returns roughly 1,172,000 unique
 proxies in about four seconds. Almost all of them are dead, so RoValid screens
 the pool against the real endpoint before the run starts — one short timeout
 per proxy, all at once — rather than discovering each corpse mid-run at the
 cost of a stalled worker.
 
-That screen is the slow part, not the scrape, so the pool is trimmed to 30,000
-first (`SCRAPE_POOL_CAP`) and the screen then takes a few minutes. The trim is
-not uniform: seven of the sources are unchecked dumps that make up ~98% of the
+That screen is the slow part, not the scrape, so only part of the pool goes
+through it. Seven of the sources are unchecked dumps making up ~98% of the
 total, so sampling evenly would drown out the curated lists that publish only
-validated proxies. Every curated source is kept whole — about 23,000 proxies —
-and the dumps fill the remaining ~7,000 as a hedge against the curated lists
-being stale on any given day. Raise the cap if you want more; the cost is
-roughly one extra minute of screening per 7,000 proxies.
+validated proxies. Instead **every curated proxy is kept** — about 32,600
+across 54 sources — and the dumps add a fixed `BULK_SAMPLE` of 7,000 on top as
+a hedge against the curated lists being stale on any given day. Screening
+those ~39,600 takes around five and a half minutes.
+
+The hedge is added rather than carved out of a shared total on purpose: under
+one fixed cap, every curated source added silently shrank it, and it reached
+zero twice. `SCRAPE_POOL_CAP` remains only as a ceiling for the pathological
+case.
+
+One source, geonode, publishes records rather than lines — every entry carries
+a last-checked time, a latency and an uptime percentage, the only material
+here verified by anyone before it arrives. Any source whose body parses as
+JSON with `ip`/`port` fields is read that way.
 
 Survivors are written to `data/proxies.txt`, so the next run can reuse them
 instead of screening again.
