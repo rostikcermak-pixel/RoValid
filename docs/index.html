@@ -5,6 +5,28 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>RoValid Live</title>
 <meta name="description" content="Roblox usernames found free, streamed as they land. A hunter runs on GitHub every 15 minutes.">
+<link rel="canonical" href="https://rostikcermak-pixel.github.io/RoValid/">
+
+<!-- The link gets pasted into Discord far more often than it gets typed, so
+     the unfurl is the page most people meet first. og.png is redrawn by the
+     hunter from the same hits.json this page reads: whatever count is on the
+     board is the count in the preview. -->
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="RoValid Live">
+<meta property="og:url" content="https://rostikcermak-pixel.github.io/RoValid/">
+<meta property="og:title" content="RoValid Live - free Roblox usernames, as they land">
+<meta property="og:description" content="A hunter runs on GitHub and posts every free username it finds. Click a name to copy it. A name here may be gone by the time you read it.">
+<meta property="og:image" content="https://rostikcermak-pixel.github.io/RoValid/og.png">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="The RoValid board: how many free Roblox usernames it is holding right now.">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="RoValid Live - free Roblox usernames, as they land">
+<meta name="twitter:description" content="A hunter runs on GitHub and posts every free username it finds. Click a name to copy it.">
+<meta name="twitter:image" content="https://rostikcermak-pixel.github.io/RoValid/og.png">
+<meta name="theme-color" content="#07090D">
+<!-- Inline so the tab icon costs no request and cannot 404 on Pages. -->
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%2307090D'/><path d='M9 23V9h7a4.5 4.5 0 0 1 0 9h-1l4 5h-4l-4-5v5z' fill='%234C9AFF'/></svg>">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap">
@@ -383,6 +405,11 @@ function renderHero(data) {
   }
   document.getElementById("foot").textContent =
     screened.toLocaleString() + " names screened so far";
+  // The count in the tab title: this page gets left open in a background tab,
+  // and that is where it says something is happening.
+  document.title = found
+    ? found.toLocaleString() + " free names — RoValid Live"
+    : "RoValid Live";
 }
 
 // The page used to count down to the next quarter hour, on the theory that

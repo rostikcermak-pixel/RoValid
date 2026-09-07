@@ -38,6 +38,19 @@ digit-free**. Good names are taken, and only come back when somebody renames
 away from one, so the board watches for exactly that rather than hoping to
 stumble on a good name at random.
 
+Every published write also redraws `docs/og.png`, the image Discord and
+Twitter show when the link is pasted. It is drawn from the same `hits.json`,
+so a link shared today advertises the count the board is holding today rather
+than whatever it held when the image was committed. `card.py` writes the PNG
+with nothing but the standard library - zlib for the file, a hand-typed 5x7
+font for the text - because the scheduled job installs `requirements.txt` and
+a social card is not worth adding a build-from-source dependency to the one
+thing that has to keep running.
+
+```bash
+python card.py docs/hits.json docs/og.png   # redraw it by hand
+```
+
 Run it yourself against a local file instead of the live one:
 
 ```bash

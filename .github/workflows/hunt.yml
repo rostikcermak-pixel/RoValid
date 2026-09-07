@@ -69,7 +69,10 @@ jobs:
             # stuck mid-rebase - 50 minutes of findings lost to a state
             # nothing clears until the next job checks out fresh.
             git rebase --abort 2>/dev/null || true
-            git add docs/hits.json
+            # og.png is the social card, redrawn from the same data; it has
+            # to travel with hits.json or the link preview advertises a count
+            # the board no longer holds.
+            git add docs/hits.json docs/og.png
             # Most cycles turn up nothing, and an empty commit every two
             # minutes would bury the history for no gain.
             if git diff --cached --quiet; then
