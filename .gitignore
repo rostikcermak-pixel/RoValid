@@ -10,7 +10,11 @@ logs/
 
 # Local hunt output; the live board file is written by the schedule only.
 hits.local.json
+# The social card a local run draws beside its own output. The live one is
+# docs/og.png and is tracked.
+/og.png
 
 # hunt.py writes the board to a temp file and renames it over the real one,
 # so a reader never sees half a JSON document. A killed run can leave one behind.
 *.json.tmp
+*.png.tmp

@@ -24,6 +24,7 @@ from typing import Callable
 
 import aiohttp
 
+import card
 from config import BATCH_MAX, Stats, is_valid_username
 from engine import AVAILABLE, MALFORMED_CHUNK, RobloxChecker, SharedCooldown
 from proxy import ProxyManager
@@ -256,6 +257,18 @@ async def main() -> int:
         tmp = out.with_name(out.name + ".tmp")
         tmp.write_text(json.dumps(data, indent=1) + "\n", encoding="utf-8")
         tmp.replace(out)
+
+        # The social card carries the live count, so a link shared anywhere
+        # shows what the board holds now rather than whatever it held the day
+        # the image was committed. Only on a forced write: it is a binary the
+        # job commits, and redrawing it every twenty seconds would put a new
+        # blob in the history for a number nobody saw change. A card that
+        # fails to draw is not worth losing a run of findings over.
+        if force:
+            try:
+                card.write(data, out.with_name("og.png"))
+            except Exception as exc:  # noqa: BLE001 - never fatal
+                print(f"card: {exc}", file=sys.stderr)
 
 
     async def work(session) -> None:
