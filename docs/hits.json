@@ -1,5 +1,5 @@
 {
- "updated": "2026-09-10T08:37:33+00:00",
+ "updated": "2026-09-10T08:43:34+00:00",
  "lengths": {
   "3": [],
   "4": [],
@@ -33,6 +33,126 @@
     "found": "2026-09-05T12:49:19+00:00",
     "tier": "solid",
     "weight": 25
+   },
+   {
+    "name": "u24ez",
+    "found": "2026-09-10T08:43:10+00:00",
+    "tier": "plain",
+    "weight": 10
+   },
+   {
+    "name": "uoh0p",
+    "found": "2026-09-10T08:43:10+00:00",
+    "tier": "plain",
+    "weight": 10
+   },
+   {
+    "name": "i3fe2",
+    "found": "2026-09-10T08:43:10+00:00",
+    "tier": "plain",
+    "weight": 10
+   },
+   {
+    "name": "8h5ug",
+    "found": "2026-09-10T08:43:10+00:00",
+    "tier": "plain",
+    "weight": 10
+   },
+   {
+    "name": "g4k1a",
+    "found": "2026-09-10T08:43:10+00:00",
+    "tier": "plain",
+    "weight": 10
+   },
+   {
+    "name": "huz6l",
+    "found": "2026-09-10T08:43:09+00:00",
+    "tier": "plain",
+    "weight": 10
+   },
+   {
+    "name": "7u8zr",
+    "found": "2026-09-10T08:43:09+00:00",
+    "tier": "plain",
+    "weight": 10
+   },
+   {
+    "name": "oz26l",
+    "found": "2026-09-10T08:43:09+00:00",
+    "tier": "plain",
+    "weight": 10
+   },
+   {
+    "name": "g64ea",
+    "found": "2026-09-10T08:43:09+00:00",
+    "tier": "plain",
+    "weight": 10
+   },
+   {
+    "name": "cd0e6",
+    "found": "2026-09-10T08:43:09+00:00",
+    "tier": "plain",
+    "weight": 10
+   },
+   {
+    "name": "ch3gi",
+    "found": "2026-09-10T08:43:09+00:00",
+    "tier": "plain",
+    "weight": 10
+   },
+   {
+    "name": "vna4j",
+    "found": "2026-09-10T08:43:08+00:00",
+    "tier": "plain",
+    "weight": 10
+   },
+   {
+    "name": "xje4e",
+    "found": "2026-09-10T08:43:08+00:00",
+    "tier": "plain",
+    "weight": 10
+   },
+   {
+    "name": "0m8a6",
+    "found": "2026-09-10T08:43:08+00:00",
+    "tier": "plain",
+    "weight": 10
+   },
+   {
+    "name": "4u1pd",
+    "found": "2026-09-10T08:43:08+00:00",
+    "tier": "plain",
+    "weight": 10
+   },
+   {
+    "name": "3eh9c",
+    "found": "2026-09-10T08:43:08+00:00",
+    "tier": "plain",
+    "weight": 10
+   },
+   {
+    "name": "aw04u",
+    "found": "2026-09-10T08:43:07+00:00",
+    "tier": "plain",
+    "weight": 10
+   },
+   {
+    "name": "ew59o",
+    "found": "2026-09-10T08:43:07+00:00",
+    "tier": "plain",
+    "weight": 10
+   },
+   {
+    "name": "iuj1c",
+    "found": "2026-09-10T08:43:06+00:00",
+    "tier": "plain",
+    "weight": 10
+   },
+   {
+    "name": "5oz9a",
+    "found": "2026-09-10T08:43:06+00:00",
+    "tier": "plain",
+    "weight": 10
    },
    {
     "name": "nj5ij",
@@ -243,126 +363,6 @@
     "found": "2026-09-10T04:19:57+00:00",
     "tier": "plain",
     "weight": 10
-   },
-   {
-    "name": "bx06e",
-    "found": "2026-09-10T04:19:57+00:00",
-    "tier": "plain",
-    "weight": 10
-   },
-   {
-    "name": "ep5hu",
-    "found": "2026-09-10T04:19:33+00:00",
-    "tier": "plain",
-    "weight": 10
-   },
-   {
-    "name": "u762l",
-    "found": "2026-09-10T04:19:32+00:00",
-    "tier": "plain",
-    "weight": 10
-   },
-   {
-    "name": "i9ufa",
-    "found": "2026-09-10T04:19:32+00:00",
-    "tier": "plain",
-    "weight": 10
-   },
-   {
-    "name": "3iwc7",
-    "found": "2026-09-10T04:19:31+00:00",
-    "tier": "plain",
-    "weight": 10
-   },
-   {
-    "name": "w1u6u",
-    "found": "2026-09-10T04:19:31+00:00",
-    "tier": "plain",
-    "weight": 10
-   },
-   {
-    "name": "g5ugk",
-    "found": "2026-09-10T04:19:31+00:00",
-    "tier": "plain",
-    "weight": 10
-   },
-   {
-    "name": "iu50a",
-    "found": "2026-09-10T04:19:30+00:00",
-    "tier": "plain",
-    "weight": 10
-   },
-   {
-    "name": "ua7zg",
-    "found": "2026-09-10T04:19:30+00:00",
-    "tier": "plain",
-    "weight": 10
-   },
-   {
-    "name": "uh92j",
-    "found": "2026-09-10T04:19:30+00:00",
-    "tier": "plain",
-    "weight": 10
-   },
-   {
-    "name": "86gqe",
-    "found": "2026-09-10T04:19:30+00:00",
-    "tier": "plain",
-    "weight": 10
-   },
-   {
-    "name": "wh9of",
-    "found": "2026-09-10T04:19:30+00:00",
-    "tier": "plain",
-    "weight": 10
-   },
-   {
-    "name": "si9z2",
-    "found": "2026-09-10T04:19:29+00:00",
-    "tier": "plain",
-    "weight": 10
-   },
-   {
-    "name": "7x0ad",
-    "found": "2026-09-10T04:19:29+00:00",
-    "tier": "plain",
-    "weight": 10
-   },
-   {
-    "name": "o756y",
-    "found": "2026-09-10T04:19:28+00:00",
-    "tier": "plain",
-    "weight": 10
-   },
-   {
-    "name": "pqo7a",
-    "found": "2026-09-10T04:19:28+00:00",
-    "tier": "plain",
-    "weight": 10
-   },
-   {
-    "name": "lu7hq",
-    "found": "2026-09-10T04:19:28+00:00",
-    "tier": "plain",
-    "weight": 10
-   },
-   {
-    "name": "3fe4u",
-    "found": "2026-09-10T04:19:27+00:00",
-    "tier": "plain",
-    "weight": 10
-   },
-   {
-    "name": "3ef8y",
-    "found": "2026-09-10T04:19:27+00:00",
-    "tier": "plain",
-    "weight": 10
-   },
-   {
-    "name": "4vdiv",
-    "found": "2026-09-10T04:19:27+00:00",
-    "tier": "plain",
-    "weight": 10
    }
   ]
  },
@@ -372,12 +372,12 @@
    "found": 0
   },
   "4": {
-   "checked": 55000,
+   "checked": 57600,
    "found": 0
   },
   "5": {
    "checked": 177200,
-   "found": 59195
+   "found": 59261
   }
  },
  "released": [],
